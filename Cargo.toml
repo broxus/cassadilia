@@ -1,0 +1,18 @@
+[package]
+name = "cassadilia"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+bincode = "2"
+thiserror = "2"
+blake3 = "1"
+rand = "0.9"
+bytes = "1"
+tracing = "0.1"
+tempfile = "3"
+hex = "0.4.3"
+
+[dev-dependencies]
+tracing-subscriber = "0.3.19"
