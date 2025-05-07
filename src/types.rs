@@ -1,13 +1,27 @@
+use std::error::Error;
 use std::fmt;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::error::Error;
 
 use anyhow::Result;
 use bincode::{Decode, Encode};
 
 pub const HASH_SIZE: usize = blake3::OUT_LEN;
+
+#[derive(Default, Clone, Debug)]
+pub struct Config {
+    pub sync_mode: SyncMode,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub enum SyncMode {
+    /// Waits for fdatasync
+    #[default]
+    Sync,
+    /// Fdatasync are done by a background thread
+    Async,
+}
 
 /// Error type for Bubs operations.
 #[derive(Debug, Clone, PartialEq)]

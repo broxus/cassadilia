@@ -540,8 +540,9 @@ where
     pub fn open(
         db_root: impl AsRef<Path>,
         key_encoder: impl KeyEncoder<K> + 'static,
+        config: Config,
     ) -> Result<Self> {
-        let inner = BubsInner::new(db_root.as_ref().to_path_buf(), key_encoder)?;
+        let inner = BubsInner::new(db_root.as_ref().to_path_buf(), key_encoder, config)?;
         Ok(Self(Arc::new(inner)))
     }
 }
@@ -550,6 +551,7 @@ pub struct BubsInner<K> {
     staging_root: PathBuf,
     cas_root: PathBuf,
     index: Index<K>,
+    datasync_channel: Option<std::sync::mpsc::Sender<File>>,
 }
 
 impl<K> Debug for BubsInner<K> {
@@ -565,7 +567,11 @@ impl<K> BubsInner<K>
 where
     K: Clone + Eq + Ord + Debug + Send + Sync + 'static,
 {
-    fn new(db_root: PathBuf, key_encoder: impl KeyEncoder<K> + 'static) -> Result<Self> {
+    fn new(
+        db_root: PathBuf,
+        key_encoder: impl KeyEncoder<K> + 'static,
+        config: Config,
+    ) -> Result<Self> {
         let key_encoder = Arc::new(key_encoder);
 
         let staging_root = db_root.join("staging");
@@ -579,7 +585,22 @@ where
 
         let index = Index::new(db_root, key_encoder)?;
 
-        Ok(Self { staging_root, cas_root, index })
+        let datasync_channel = match config.sync_mode {
+            SyncMode::Sync => None,
+            SyncMode::Async => {
+                let (sender, receiver) = std::sync::mpsc::channel::<File>();
+                std::thread::spawn(move || {
+                    for file in receiver {
+                        if let Err(e) = file.sync_data() {
+                            tracing::error!("Failed to sync file: {e}");
+                        }
+                    }
+                });
+                Some(sender)
+            }
+        };
+
+        Ok(Self { staging_root, cas_root, index, datasync_channel })
     }
 
     pub fn put(&self, key: K) -> Result<Transaction<K>> {
@@ -658,6 +679,16 @@ where
         } else {
             Err(anyhow!(BubsError::KeyNotFound))
         }
+    }
+
+    fn fdatasync(&self, file: File) -> Result<()> {
+        if let Some(ref sender) = self.datasync_channel {
+            sender.send(file)?;
+        } else {
+            file.sync_data()?;
+        }
+
+        Ok(())
     }
 
     pub fn known_keys(&self) -> BTreeSet<K> {
@@ -785,7 +816,9 @@ where
 
     fn commit_transaction(&self, mut transaction: Transaction<K>) -> Result<()> {
         transaction.writer.flush()?;
-        transaction.writer.get_mut().sync_data()?;
+
+        let file = transaction.writer.get_mut().try_clone()?;
+        self.fdatasync(file)?;
 
         let hash = transaction.hasher.finalize();
         let blob_hash = BlobHash::from_bytes(*hash.as_bytes());
@@ -951,7 +984,7 @@ mod tests {
     fn test_put_get_remove_string_key() -> Result<()> {
         setup_tracing();
         let dir = tempdir()?;
-        let bubs = Bubs::open(dir.path(), StringEncoder)?;
+        let bubs = Bubs::open(dir.path(), StringEncoder, Default::default())?;
 
         let key1 = "my_first_blob".to_string();
         let data1 = b"Hello, Bubs!";
@@ -990,7 +1023,7 @@ mod tests {
     fn test_put_get_remove_bytes_key() -> Result<()> {
         setup_tracing();
         let dir = tempdir()?;
-        let bubs = Bubs::open(dir.path(), VecU8Encoder)?;
+        let bubs = Bubs::open(dir.path(), VecU8Encoder, Default::default())?;
 
         let key1 = b"my_bytes_blob".to_vec();
         let data1 = b"Binary data here!";
@@ -1014,7 +1047,7 @@ mod tests {
     fn test_get_range() -> Result<()> {
         setup_tracing();
         let dir = tempdir()?;
-        let bubs = Bubs::open(dir.path(), StringEncoder)?;
+        let bubs = Bubs::open(dir.path(), StringEncoder, Default::default())?;
 
         let key = "range_blob".to_string();
         let data = b"0123456789abcdef";
@@ -1058,7 +1091,7 @@ mod tests {
         let db_path = dir.path();
 
         {
-            let bubs1 = Bubs::open(db_path, StringEncoder)?;
+            let bubs1 = Bubs::open(db_path, StringEncoder, Default::default())?;
             let key = "overwrite_test".to_string();
 
             let mut tx1 = bubs1.put(key.clone())?;
@@ -1070,7 +1103,7 @@ mod tests {
         }
 
         {
-            let bubs2 = Bubs::open(db_path, StringEncoder)?;
+            let bubs2 = Bubs::open(db_path, StringEncoder, Default::default())?;
             let key = "overwrite_test".to_string();
 
             let v1_reloaded = bubs2.get(&key)?.unwrap();
@@ -1085,7 +1118,7 @@ mod tests {
         }
 
         {
-            let bubs3 = Bubs::open(db_path, StringEncoder)?;
+            let bubs3 = Bubs::open(db_path, StringEncoder, Default::default())?;
             let key = "overwrite_test".to_string();
 
             let v2_reloaded = bubs3.get(&key)?.unwrap();
@@ -1106,7 +1139,7 @@ mod tests {
         let key = "remove_persist_test".to_string();
 
         {
-            let bubs1 = Bubs::open(db_path, StringEncoder)?;
+            let bubs1 = Bubs::open(db_path, StringEncoder, Default::default())?;
 
             let mut tx = bubs1.put(key.clone())?;
             tx.write(b"Data to be removed")?;
@@ -1119,7 +1152,7 @@ mod tests {
         }
 
         {
-            let bubs2 = Bubs::open(db_path, StringEncoder)?;
+            let bubs2 = Bubs::open(db_path, StringEncoder, Default::default())?;
             assert!(bubs2.get(&key)?.is_none(), "Data should remain removed after reopen");
         }
         Ok(())
@@ -1129,7 +1162,7 @@ mod tests {
     fn test_transaction_drop_cleanup() -> Result<()> {
         setup_tracing();
         let dir = tempdir()?;
-        let bubs = Bubs::open(dir.path(), StringEncoder)?;
+        let bubs = Bubs::open(dir.path(), StringEncoder, Default::default())?;
         let key = "dropped_tx_key".to_string();
         let staging_dir = dir.path().join("staging");
 
@@ -1174,7 +1207,7 @@ mod tests {
         let data2 = b"checkpoint_data2";
 
         {
-            let bubs1 = Bubs::open(db_path, StringEncoder)?;
+            let bubs1 = Bubs::open(db_path, StringEncoder, Default::default())?;
             let mut tx1 = bubs1.put(key1.clone())?;
             tx1.write(data1)?;
             tx1.finish()?;
@@ -1208,7 +1241,7 @@ mod tests {
         }
 
         {
-            let bubs2 = Bubs::open(db_path, StringEncoder)?;
+            let bubs2 = Bubs::open(db_path, StringEncoder, Default::default())?;
             assert_eq!(
                 bubs2.get(&key1)?.unwrap().as_ref(),
                 data1,
@@ -1237,7 +1270,7 @@ mod tests {
         let db_path = dir.path();
 
         {
-            let bubs = Bubs::open(db_path, StringEncoder)?;
+            let bubs = Bubs::open(db_path, StringEncoder, Default::default())?;
             let keys_to_insert = ["alpha", "beta", "gamma", "delta", "epsilon"];
             for (i, key_name) in keys_to_insert.iter().enumerate() {
                 let mut tx = bubs.put(key_name.to_string())?;
@@ -1256,7 +1289,7 @@ mod tests {
         }
 
         {
-            let bubs = Bubs::open(db_path, StringEncoder)?;
+            let bubs = Bubs::open(db_path, StringEncoder, Default::default())?;
             assert!(
                 bubs.get(&"alpha".to_string())?.is_some(),
                 "alpha should still exist after reopen"
