@@ -1,69 +1,15 @@
-use std::error::Error;
 use std::fmt;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use anyhow::Result;
-use bincode::{Decode, Encode};
+use parking_lot::Mutex;
+use thiserror::Error;
 
 pub const HASH_SIZE: usize = blake3::OUT_LEN;
 
-#[derive(Default, Clone, Debug)]
-pub struct Config {
-    pub sync_mode: SyncMode,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub enum SyncMode {
-    /// Waits for fdatasync
-    #[default]
-    Sync,
-    /// Fdatasync are done by a background thread
-    Async,
-}
-
-/// Error type for Bubs operations.
-#[derive(Debug, Clone, PartialEq)]
-pub enum BubsError {
-    InvalidHashFormat(String),
-    InvalidRange(String),
-    KeyNotFound,
-    WalCorruption(String),
-    WalReplayFailed(String),
-    WalIoError(String),
-}
-
-impl fmt::Display for BubsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BubsError::InvalidHashFormat(s) => write!(f, "Invalid hash format: {}", s),
-            BubsError::InvalidRange(s) => write!(f, "Invalid range requested: {}", s),
-            BubsError::KeyNotFound => write!(f, "Key not found"),
-            BubsError::WalCorruption(s) => write!(f, "WAL corrupted: {}", s),
-            BubsError::WalReplayFailed(s) => write!(f, "WAL replay failed: {}", s),
-            BubsError::WalIoError(s) => write!(f, "WAL I/O error: {}", s),
-        }
-    }
-}
-
-impl Error for BubsError {}
-
-#[derive(Debug, Clone)]
-pub enum WalOp<K> {
-    Put { key: K, hash: BlobHash },
-    Remove { key: K },
-    RemoveMultiple { keys: Vec<K> },
-}
-
-#[derive(Encode, Decode, Debug, Clone)]
-pub enum WalOpRaw {
-    Put { key_bytes: Vec<u8>, hash: BlobHash },
-    Remove { key_bytes: Vec<u8> },
-    RemoveMultiple { key_bytes_list: Vec<Vec<u8>> },
-}
-
-#[derive(Clone, Copy, Eq, Encode, Decode)]
+#[derive(Clone, Copy, Eq, Ord, PartialOrd)]
 pub struct BlobHash(pub [u8; HASH_SIZE]);
 
 impl BlobHash {
@@ -75,10 +21,9 @@ impl BlobHash {
         hex::encode(self.0)
     }
 
-    pub fn from_hex(hex_str: &str) -> Result<Self, BubsError> {
+    pub fn from_hex(hex_str: &str) -> Result<Self, TypesError> {
         let mut bytes = [0u8; HASH_SIZE];
-        hex::decode_to_slice(hex_str, &mut bytes)
-            .map_err(|e| BubsError::InvalidHashFormat(format!("Invalid hex: {}", e)))?;
+        hex::decode_to_slice(hex_str, &mut bytes)?;
         Ok(Self(bytes))
     }
 
@@ -110,7 +55,7 @@ impl Hash for BlobHash {
     }
 }
 
-impl fmt::Debug for BlobHash {
+impl Debug for BlobHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("BlobHash").field(&self.to_hex()).finish()
     }
@@ -134,64 +79,170 @@ impl AsRef<[u8]> for BlobHash {
     }
 }
 
-#[derive(Clone, Eq, PartialEq, Hash, Debug)]
-#[repr(transparent)]
-pub struct Bytes(pub bytes::Bytes);
+#[derive(Error, Debug, Clone, PartialEq)]
+pub enum KeyEncoderError {
+    #[error("Failed to encode key")]
+    EncodeError,
+    #[error("Failed to decode key")]
+    DecodeError,
+}
 
-impl Bytes {
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
+pub trait KeyEncoder<K>: Send + Sync + 'static {
+    fn encode(&self, key: &K) -> Result<Vec<u8>, KeyEncoderError>;
+    fn decode(&self, data: &[u8]) -> Result<K, KeyEncoderError>;
+}
 
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
+// ========== config ==========
+#[derive(Clone, Copy, Debug, Default)]
+pub enum SyncMode {
+    /// Waits for fdatasync
+    #[default]
+    Sync,
+    /// Fdatasync are done by a background thread
+    Async,
+}
 
-    pub fn from_slice(slice: &[u8]) -> Self {
-        Bytes(bytes::Bytes::copy_from_slice(slice))
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub sync_mode: SyncMode,
+    pub num_ops_per_wal: u64,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config { sync_mode: SyncMode::default(), num_ops_per_wal: 100_000 }
     }
 }
 
-impl AsRef<[u8]> for Bytes {
-    fn as_ref(&self) -> &[u8] {
-        self.0.as_ref()
+// ========== core ops ==========
+
+#[derive(Debug, Clone)]
+pub enum WalOpRaw {
+    Put { key_bytes: Vec<u8>, hash: BlobHash },
+    Remove { keys_bytes: Vec<Vec<u8>> },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum WalOp<K> {
+    Put { key: K, hash: BlobHash },
+    Remove { keys: Vec<K> },
+}
+
+impl<K> WalOp<K> {
+    pub fn from_raw(
+        raw_op: WalOpRaw,
+        key_encoder: &Arc<dyn KeyEncoder<K> + Send + Sync>,
+    ) -> Result<Self, TypesError>
+    where
+        K: 'static,
+    {
+        match raw_op {
+            WalOpRaw::Put { key_bytes, hash } => {
+                let key = key_encoder
+                    .decode(&key_bytes)
+                    .map_err(|e| TypesError::DecodeKeyPutFailed { source: e })?;
+                Ok(WalOp::Put { key, hash })
+            }
+            WalOpRaw::Remove { keys_bytes } => {
+                let mut keys = Vec::new();
+                for (i, key_bytes) in keys_bytes.iter().enumerate() {
+                    let key = key_encoder
+                        .decode(key_bytes)
+                        .map_err(|e| TypesError::RemoveDecodeKey { index: i, source: e })?;
+                    keys.push(key);
+                }
+                Ok(WalOp::Remove { keys })
+            }
+        }
+    }
+
+    pub fn to_raw(&self, key_encoder: &Arc<dyn KeyEncoder<K>>) -> Result<WalOpRaw, KeyEncoderError>
+    where
+        K: 'static,
+    {
+        match self {
+            WalOp::Put { key, hash } => {
+                let key_bytes = key_encoder.encode(key)?;
+                Ok(WalOpRaw::Put { key_bytes, hash: *hash })
+            }
+            WalOp::Remove { keys } => {
+                let mut keys_bytes = Vec::new();
+                for key in keys {
+                    let key_bytes = key_encoder.encode(key)?;
+                    keys_bytes.push(key_bytes);
+                }
+                Ok(WalOpRaw::Remove { keys_bytes })
+            }
+        }
     }
 }
 
-impl<T: Into<bytes::Bytes>> From<T> for Bytes {
-    fn from(value: T) -> Self {
-        Bytes(value.into())
-    }
+#[derive(Error, Debug, Clone, PartialEq)]
+pub enum TypesError {
+    #[error("Invalid hash format")]
+    InvalidHashFormat(#[from] hex::FromHexError),
+
+    #[error("Remove: insufficient data for num_keys")]
+    RemoveInsufficientDataNumKeys,
+    #[error("Remove: failed to convert num_keys bytes")]
+    RemoveNumKeysConversion,
+    #[error("Remove: insufficient data for key length at index {index}")]
+    RemoveInsufficientDataKeyLength { index: usize },
+    #[error("Remove: failed to convert key length bytes at index {index}")]
+    RemoveKeyLengthConversion { index: usize },
+    #[error("Remove: insufficient data for key bytes at index {index}")]
+    RemoveInsufficientDataKeyBytes { index: usize },
+    #[error("Remove: failed to decode key at index {index}")]
+    RemoveDecodeKey {
+        index: usize,
+        #[source]
+        source: KeyEncoderError,
+    },
+
+    #[error("Failed to decode key for Put operation")]
+    DecodeKeyPutFailed {
+        #[source]
+        source: KeyEncoderError,
+    },
 }
 
-impl Encode for Bytes {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> core::result::Result<(), bincode::error::EncodeError> {
-        Encode::encode(self.0.as_ref(), encoder)
-    }
-}
+// ========== WAL ==========
 
-impl<Ctx> Decode<Ctx> for Bytes {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> core::result::Result<Self, bincode::error::DecodeError> {
-        let vec: Vec<u8> = Decode::decode(decoder)?;
-        Ok(Bytes(bytes::Bytes::from(vec)))
-    }
-}
+/// Represents the checkpoint state of the WAL
+pub(crate) type CheckpointState = Option<u64>;
 
-impl<'de, Ctx> bincode::BorrowDecode<'de, Ctx> for Bytes {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de>>(
-        decoder: &mut D,
-    ) -> core::result::Result<Self, bincode::error::DecodeError> {
-        let vec: Vec<u8> = bincode::BorrowDecode::borrow_decode(decoder)?;
-        Ok(Bytes(bytes::Bytes::from(vec)))
-    }
-}
-pub const WAL_ENTRY_VERSION_SIZE: usize = std::mem::size_of::<u64>();
+pub const WAL_ENTRY_VERSION_SIZE: usize = size_of::<u64>();
 pub const WAL_ENTRY_OP_HASH_SIZE: usize = HASH_SIZE;
-pub const WAL_ENTRY_OP_LEN_SIZE: usize = std::mem::size_of::<u32>();
+pub const WAL_ENTRY_OP_LEN_SIZE: usize = size_of::<u32>();
 pub const WAL_ENTRY_HEADER_SIZE: usize =
     WAL_ENTRY_VERSION_SIZE + WAL_ENTRY_OP_HASH_SIZE + WAL_ENTRY_OP_LEN_SIZE;
+
+/// Represents a discovered WAL segment
+#[derive(Debug, Clone)]
+pub(crate) struct SegmentInfo {
+    pub id: u64,
+    pub path: PathBuf,
+}
+
+impl SegmentInfo {
+    pub(crate) fn new(id: u64, path: PathBuf) -> Self {
+        Self { id, path }
+    }
+}
+
+// ==========  Utility Types ==========
+
+#[derive(Clone, Debug)]
+pub(crate) struct FsLock {
+    lock: Arc<Mutex<()>>,
+}
+
+impl FsLock {
+    pub(crate) fn new() -> Self {
+        FsLock { lock: Arc::new(Mutex::new(())) }
+    }
+
+    pub(crate) fn lock(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.lock.lock()
+    }
+}
