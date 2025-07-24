@@ -86,7 +86,7 @@ impl SegmentWriter {
     // this marks the segment as permanently finished.
     pub(crate) fn seal(mut self) -> Result<(), WalError> {
         tracing::debug!("Sealing WAL segment {}", self.segment_id);
-        
+
         // write an explicit end-of-segment marker.
         let sentinel_header = [0u8; WAL_ENTRY_HEADER_SIZE];
         self.writer.write_all(&sentinel_header).map_err(|e| WalError::Io {
@@ -102,14 +102,13 @@ impl SegmentWriter {
 
     // closes the segment, ensuring all data is flushed and synced.
     // this does NOT write a sentinel marker.
-    pub(crate) fn close(mut self) -> Result<(), WalError> {
+    pub(crate) fn close(self) -> Result<(), WalError> {
         tracing::debug!("Closing WAL segment writer for segment {}", self.segment_id);
-        self.writer.flush().map_err(|e| WalError::Io {
+        let file = self.writer.into_inner().map_err(|e| WalError::Io {
             operation: WalIoOperation::FlushWriter,
             path: None,
-            source: e,
+            source: e.into_error(),
         })?;
-        let file = self.writer.into_inner().map_err(WalError::GetInnerFileWalWriter)?;
         file.sync_data().map_err(|e| WalError::Io {
             operation: WalIoOperation::SyncData,
             path: None,

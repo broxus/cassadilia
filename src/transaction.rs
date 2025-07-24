@@ -99,19 +99,14 @@ where
         self.commit()
     }
 
-    fn commit(mut self) -> Result<(), crate::LibError<K>> {
+    fn commit(self) -> Result<(), crate::LibError<K>> {
         use crate::LibIoOperation;
         use crate::types::{BlobHash, WalOp};
 
-        self.writer.flush().map_err(|e| crate::LibError::Io {
+        let file_to_sync = self.writer.into_inner().map_err(|e| crate::LibError::Io {
             operation: LibIoOperation::CommitFlushWriter,
             path: None,
-            source: e,
-        })?;
-        let file_to_sync = self.writer.get_mut().try_clone().map_err(|e| crate::LibError::Io {
-            operation: LibIoOperation::CommitCloneHandle,
-            path: None,
-            source: e,
+            source: e.into_error(),
         })?;
         self.cas_inner.fdatasync(file_to_sync)?;
 
