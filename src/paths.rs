@@ -18,7 +18,7 @@ impl DbPaths {
     }
 
     pub fn wal_path_for_segment(&self, segment_id: u64) -> PathBuf {
-        self.db_root.join(format!("{}_index.wal", segment_id))
+        self.db_root.join(format!("{segment_id}_index.wal"))
     }
 
     pub fn index_file_path(&self) -> PathBuf {
@@ -34,7 +34,7 @@ impl DbPaths {
     }
 
     pub fn checkpoint_meta_tmp_path(&self) -> PathBuf {
-        self.db_root.join(format!("{}.tmp", CHECKPOINT_META_FILENAME))
+        self.db_root.join(format!("{CHECKPOINT_META_FILENAME}.tmp"))
     }
 
     pub fn cas_root_path(&self) -> PathBuf {

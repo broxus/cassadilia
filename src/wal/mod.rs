@@ -1,8 +1,6 @@
 #[cfg(test)]
 mod tests;
 
-use std::fs::File;
-use std::io::BufWriter;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -53,9 +51,6 @@ pub enum WalError {
         #[source]
         source: std::io::Error,
     },
-
-    #[error("Failed to get inner file from WAL writer after flush")]
-    GetInnerFileWalWriter(#[source] std::io::IntoInnerError<BufWriter<File>>),
 
     #[error("WAL replay IO error during {step:?} for segment {segment_id} (path: {path:?})")]
     ReplayIo {
