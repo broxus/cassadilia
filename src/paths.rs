@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::index::CHECKPOINT_META_FILENAME;
 use crate::types::BlobHash;
@@ -6,14 +6,35 @@ use crate::types::BlobHash;
 #[derive(Debug, Clone)]
 pub(crate) struct DbPaths {
     db_root: PathBuf,
+    index_path: PathBuf,
+    index_tmp_path: PathBuf,
+    checkpoint_meta_path: PathBuf,
+    checkpoint_meta_tmp_path: PathBuf,
+    cas_root_path: PathBuf,
+    staging_root_path: PathBuf,
 }
 
 impl DbPaths {
     pub fn new(db_root: PathBuf) -> Self {
-        Self { db_root }
+        let index_path = db_root.join("index");
+        let index_tmp_path = db_root.join("index.tmp");
+        let checkpoint_meta_path = db_root.join(CHECKPOINT_META_FILENAME);
+        let checkpoint_meta_tmp_path = db_root.join(format!("{CHECKPOINT_META_FILENAME}.tmp"));
+        let cas_root_path = db_root.join("cas");
+        let staging_root_path = db_root.join("staging");
+        
+        Self {
+            db_root,
+            index_path,
+            index_tmp_path,
+            checkpoint_meta_path,
+            checkpoint_meta_tmp_path,
+            cas_root_path,
+            staging_root_path,
+        }
     }
 
-    pub fn db_root_path(&self) -> &PathBuf {
+    pub fn db_root_path(&self) -> &Path {
         &self.db_root
     }
 
@@ -21,28 +42,28 @@ impl DbPaths {
         self.db_root.join(format!("{segment_id}_index.wal"))
     }
 
-    pub fn index_file_path(&self) -> PathBuf {
-        self.db_root.join("index")
+    pub fn index_file_path(&self) -> &Path {
+        &self.index_path
     }
 
-    pub fn index_tmp_path(&self) -> PathBuf {
-        self.db_root.join("index.tmp")
+    pub fn index_tmp_path(&self) -> &Path {
+        &self.index_tmp_path
     }
 
-    pub fn checkpoint_meta_path(&self) -> PathBuf {
-        self.db_root.join(CHECKPOINT_META_FILENAME)
+    pub fn checkpoint_meta_path(&self) -> &Path {
+        &self.checkpoint_meta_path
     }
 
-    pub fn checkpoint_meta_tmp_path(&self) -> PathBuf {
-        self.db_root.join(format!("{CHECKPOINT_META_FILENAME}.tmp"))
+    pub fn checkpoint_meta_tmp_path(&self) -> &Path {
+        &self.checkpoint_meta_tmp_path
     }
 
-    pub fn cas_root_path(&self) -> PathBuf {
-        self.db_root.join("cas")
+    pub fn cas_root_path(&self) -> &Path {
+        &self.cas_root_path
     }
 
-    pub fn staging_root_path(&self) -> PathBuf {
-        self.db_root.join("staging")
+    pub fn staging_root_path(&self) -> &Path {
+        &self.staging_root_path
     }
 
     pub fn cas_file_path(&self, hash: &BlobHash) -> PathBuf {

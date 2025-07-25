@@ -136,12 +136,12 @@ where
 
         std::fs::create_dir_all(paths.staging_root_path()).map_err(|e| LibError::Io {
             operation: LibIoOperation::CreateStagingDir,
-            path: Some(paths.staging_root_path()),
+            path: Some(paths.staging_root_path().to_path_buf()),
             source: e,
         })?;
         std::fs::create_dir_all(paths.cas_root_path()).map_err(|e| LibError::Io {
             operation: LibIoOperation::CreateCasDir,
-            path: Some(paths.cas_root_path()),
+            path: Some(paths.cas_root_path().to_path_buf()),
             source: e,
         })?;
 
@@ -167,6 +167,7 @@ where
         Ok(Self { paths, index, datasync_channel, cas_manager })
     }
 
+    /// Start a new transaction for the given key.
     pub fn put(&self, key: K) -> Result<Transaction<K>, LibError> {
         Transaction::new(self, key).map_err(|e| match e {
             transaction::TransactionError::StagingFileIo { operation, path, source } => {

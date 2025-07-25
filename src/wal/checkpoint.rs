@@ -14,8 +14,8 @@ pub(crate) struct CheckpointPersister {
 impl CheckpointPersister {
     pub(crate) fn new(paths: &DbPaths) -> Self {
         Self {
-            meta_path: paths.checkpoint_meta_path(),
-            tmp_meta_path: paths.checkpoint_meta_tmp_path(),
+            meta_path: paths.checkpoint_meta_path().to_path_buf(),
+            tmp_meta_path: paths.checkpoint_meta_tmp_path().to_path_buf(),
         }
     }
 

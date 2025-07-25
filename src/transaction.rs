@@ -59,7 +59,7 @@ where
         let temp_file =
             NamedTempFile::new_in(&staging_dir).map_err(|e| TransactionError::StagingFileIo {
                 operation: StagingFileOp::Create,
-                path: staging_dir,
+                path: staging_dir.to_path_buf(),
                 source: e,
             })?;
 
@@ -84,6 +84,8 @@ where
         })
     }
 
+    /// Append `data` to the transaction.
+    /// Most common usage is to incrementally compress and write chunks.
     pub fn write(&mut self, data: &[u8]) -> Result<(), TransactionError> {
         self.hasher.update(data);
         self.writer.write_all(data).map_err(|e| TransactionError::StagingFileIo {
