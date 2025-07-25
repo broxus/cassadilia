@@ -35,15 +35,12 @@ impl std::fmt::Display for IndexIoOperation {
 }
 
 #[derive(Error, Debug)]
-pub enum IndexError<K>
-where
-    K: Debug,
-{
+pub enum IndexError {
     #[error("Index persister error")]
     PersistFailed(#[from] PersisterError),
 
-    #[error("Key not found: {key:?}")]
-    KeyNotFound { key: K },
+    #[error("Key not found: {key}")]
+    KeyNotFound { key: String },
 
     #[error("Initialization: Failed to {operation}")]
     Io {
@@ -87,7 +84,7 @@ where
         db_root: PathBuf,
         key_encoder: Arc<dyn KeyEncoder<K>>,
         config: Config,
-    ) -> Result<Self, IndexError<K>> {
+    ) -> Result<Self, IndexError> {
         Self::initialize_directories(&db_root)?;
         let paths = DbPaths::new(db_root.clone());
         let mut wal_manager = WalManager::new(paths.clone(), config.num_ops_per_wal)
@@ -109,11 +106,11 @@ where
         Ok(index)
     }
 
-    pub fn apply_wal_op(&self, logical_op: &WalOp<K>) -> Result<Vec<BlobHash>, IndexError<K>> {
+    pub fn apply_wal_op(&self, logical_op: &WalOp<K>) -> Result<Vec<BlobHash>, IndexError> {
         let op_data =
-            logical_op.to_raw(&self.key_encoder).map_err(|e| IndexError::WalOpToRawEncodeKey(e))?;
+            logical_op.to_raw(&self.key_encoder).map_err(IndexError::WalOpToRawEncodeKey)?;
         let op_data =
-            serialize_wal_op_raw(&op_data).map_err(|e| IndexError::ApplyWalOpSerialize(e))?;
+            serialize_wal_op_raw(&op_data).map_err(IndexError::ApplyWalOpSerialize)?;
 
         let WalAppendInfo { version, .. } = {
             let mut wal_guard = self.wal.lock();
@@ -129,7 +126,7 @@ where
         Ok(unreferenced_hashes)
     }
 
-    pub fn checkpoint(&self, seal_segment: bool) -> Result<(), IndexError<K>> {
+    pub fn checkpoint(&self, seal_segment: bool) -> Result<(), IndexError> {
         tracing::info!("Starting checkpoint operation.");
 
         {
@@ -151,8 +148,8 @@ where
         state_guard.key_to_hash.get(key).copied()
     }
 
-    pub fn require_hash_for_key(&self, key: &K) -> Result<BlobHash, IndexError<K>> {
-        self.get_hash_for_key(key).ok_or(IndexError::KeyNotFound { key: key.clone() })
+    pub fn require_hash_for_key(&self, key: &K) -> Result<BlobHash, IndexError> {
+        self.get_hash_for_key(key).ok_or(IndexError::KeyNotFound { key: format!("{key:?}") })
     }
 
     pub fn contains_key(&self, key: &K) -> bool {
@@ -174,7 +171,7 @@ where
         state_guard.key_to_hash.clone()
     }
 
-    fn initialize_directories(db_root: &PathBuf) -> Result<(), IndexError<K>> {
+    fn initialize_directories(db_root: &PathBuf) -> Result<(), IndexError> {
         if let Some(parent_dir) = db_root.parent() {
             std::fs::create_dir_all(parent_dir).map_err(|e| IndexError::Io {
                 operation: IndexIoOperation::CreateParentDir,

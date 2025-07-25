@@ -42,10 +42,7 @@ pub enum LibIoOperation {
 }
 
 #[derive(Error, Debug)]
-pub enum LibError<K>
-where
-    K: Clone + Debug,
-{
+pub enum LibError {
     #[error("IO operation failed: {operation:?} at path {}", path.as_ref().map_or("unknown".to_string(), |p| p.display().to_string()))]
     Io {
         operation: LibIoOperation,
@@ -57,8 +54,8 @@ where
     #[error("CAS operation failed")]
     Cas(CasManagerError),
 
-    #[error("Blob data missing for key {key:?} with hash {hash}")]
-    BlobDataMissing { key: K, hash: BlobHash },
+    #[error("Blob data missing for key {key} with hash {hash}")]
+    BlobDataMissing { key: String, hash: BlobHash },
 
     #[error("Transaction commit: fdatasync send failed")]
     CommitFdatasyncSend(std::sync::mpsc::SendError<File>),
@@ -66,7 +63,7 @@ where
     CommitFdatasyncIo(#[source] std::io::Error),
 
     #[error("Index operation failed")]
-    Index(IndexError<K>),
+    Index(IndexError),
 
     #[error("Key encoder operation failed")]
     KeyEncoderError(KeyEncoderError),
@@ -97,7 +94,7 @@ where
         db_root: impl AsRef<Path>,
         key_encoder: impl KeyEncoder<K> + 'static,
         config: Config,
-    ) -> Result<Self, LibError<K>> {
+    ) -> Result<Self, LibError> {
         let inner = CasInner::new(db_root.as_ref().to_path_buf(), key_encoder, config)?;
         Ok(Self(Arc::new(inner)))
     }
@@ -131,7 +128,7 @@ where
         db_root: PathBuf,
         key_encoder: impl KeyEncoder<K> + 'static,
         config: Config,
-    ) -> Result<Self, LibError<K>> {
+    ) -> Result<Self, LibError> {
         let key_encoder = Arc::new(key_encoder);
 
         let fs_lock = FsLock::new();
@@ -150,7 +147,7 @@ where
 
         let cas_manager = Arc::new(CasManager::new(paths.clone(), fs_lock.clone()));
         let index =
-            Index::load(db_root, key_encoder, config.clone()).map_err(|e| LibError::Index(e))?;
+            Index::load(db_root, key_encoder, config.clone()).map_err(LibError::Index)?;
 
         let datasync_channel = match config.sync_mode {
             SyncMode::Sync => None,
@@ -170,7 +167,7 @@ where
         Ok(Self { paths, index, datasync_channel, cas_manager })
     }
 
-    pub fn put(&self, key: K) -> Result<Transaction<K>, LibError<K>> {
+    pub fn put(&self, key: K) -> Result<Transaction<K>, LibError> {
         Transaction::new(self, key).map_err(|e| match e {
             transaction::TransactionError::StagingFileIo { operation, path, source } => {
                 match operation {
@@ -197,29 +194,29 @@ where
         self.index.contains_key(key)
     }
 
-    pub fn get(&self, key: &K) -> Result<Option<bytes::Bytes>, LibError<K>> {
+    pub fn get(&self, key: &K) -> Result<Option<bytes::Bytes>, LibError> {
         self.with_blob_hash(key, "read", false, |blob_hash| self.cas_manager.read_blob(blob_hash))
     }
 
-    pub fn size(&self, key: &K) -> Result<Option<u64>, LibError<K>> {
+    pub fn size(&self, key: &K) -> Result<Option<u64>, LibError> {
         self.with_blob_hash(key, "size check", false, |blob_hash| {
             self.cas_manager.blob_size(blob_hash)
         })
     }
 
-    pub fn raw_bufreader(&self, key: &K) -> Result<BufReader<File>, LibError<K>> {
+    pub fn raw_bufreader(&self, key: &K) -> Result<BufReader<File>, LibError> {
         let blob_hash = self.index.require_hash_for_key(key).map_err(LibError::Index)?;
         self.cas_manager.blob_bufreader(&blob_hash).map_err(LibError::Cas)
     }
 
-    fn fdatasync(&self, file: File) -> Result<(), LibError<K>> {
+    fn fdatasync(&self, file: File) -> Result<(), LibError> {
         match &self.datasync_channel {
             Some(sender) => {
-                sender.send(file).map_err(|e| LibError::CommitFdatasyncSend(e))?;
+                sender.send(file).map_err(LibError::CommitFdatasyncSend)?;
                 Ok(())
             }
             None => {
-                file.sync_data().map_err(|e| LibError::CommitFdatasyncIo(e))?;
+                file.sync_data().map_err(LibError::CommitFdatasyncIo)?;
                 Ok(())
             }
         }
@@ -238,16 +235,16 @@ where
         key: &K,
         range_start: u64,
         range_end: u64,
-    ) -> Result<Option<bytes::Bytes>, LibError<K>> {
+    ) -> Result<Option<bytes::Bytes>, LibError> {
         self.with_blob_hash(key, "range read", false, |blob_hash| {
             self.cas_manager.read_blob_range(blob_hash, range_start, range_end)
         })
     }
 
-    pub fn remove(&self, key: &K) -> Result<bool, LibError<K>> {
+    pub fn remove(&self, key: &K) -> Result<bool, LibError> {
         if self.index.contains_key(key) {
             let op = WalOp::Remove { keys: vec![key.clone()] };
-            let to_delete = self.index.apply_wal_op(&op).map_err(|e| LibError::Index(e))?;
+            let to_delete = self.index.apply_wal_op(&op).map_err(LibError::Index)?;
             let _deleted_hashes =
                 self.cas_manager.delete_blobs(&to_delete).map_err(LibError::Cas)?;
             Ok(true)
@@ -260,7 +257,7 @@ where
         self.index.known_blobs()
     }
 
-    pub fn remove_range<R>(&self, range: R) -> Result<usize, LibError<K>>
+    pub fn remove_range<R>(&self, range: R) -> Result<usize, LibError>
     where
         R: RangeBounds<K> + Debug + Clone,
     {
@@ -274,14 +271,14 @@ where
         tracing::debug!("Removing {} keys in range {:?}", keys_to_remove.len(), range);
 
         let op = WalOp::Remove { keys: keys_to_remove.clone() };
-        let to_delete = self.index.apply_wal_op(&op).map_err(|e| LibError::Index(e))?;
+        let to_delete = self.index.apply_wal_op(&op).map_err(LibError::Index)?;
         let _deleted_hashes = self.cas_manager.delete_blobs(&to_delete).map_err(LibError::Cas)?;
 
         Ok(keys_to_remove.len())
     }
 
-    pub fn checkpoint(&self) -> Result<(), LibError<K>> {
-        self.index.checkpoint(true).map_err(|e| LibError::Index(e))
+    pub fn checkpoint(&self) -> Result<(), LibError> {
+        self.index.checkpoint(true).map_err(LibError::Index)
     }
 
     fn with_blob_hash<T, F>(
@@ -290,7 +287,7 @@ where
         operation_name: &'static str,
         return_err_on_missing: bool,
         f: F,
-    ) -> Result<Option<T>, LibError<K>>
+    ) -> Result<Option<T>, LibError>
     where
         F: FnOnce(&BlobHash) -> Result<T, CasManagerError>,
     {
@@ -309,7 +306,7 @@ where
                                 operation_name
                             );
                             return if return_err_on_missing {
-                                Err(LibError::BlobDataMissing { key: key.clone(), hash: blob_hash })
+                                Err(LibError::BlobDataMissing { key: format!("{key:?}"), hash: blob_hash })
                             } else {
                                 Ok(None)
                             };
@@ -319,7 +316,7 @@ where
                 }
             }
         } else if return_err_on_missing {
-            Err(LibError::Index(IndexError::KeyNotFound { key: key.clone() }))
+            Err(LibError::Index(IndexError::KeyNotFound { key: format!("{key:?}") }))
         } else {
             Ok(None)
         }

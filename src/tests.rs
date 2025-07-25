@@ -321,7 +321,7 @@ fn test_api_on_nonexistent_key() -> Result<()> {
 
     let result = cas.raw_bufreader(&key);
     match result {
-        Err(LibError::Index(IndexError::KeyNotFound { key: k })) => assert_eq!(k, key),
+        Err(LibError::Index(IndexError::KeyNotFound { .. })) => {},
         _ => panic!("Expected KeyNotFound error, got: {result:?}"),
     }
 

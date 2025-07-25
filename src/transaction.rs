@@ -94,12 +94,12 @@ where
         Ok(())
     }
 
-    pub fn finish(self) -> Result<(), crate::LibError<K>> {
+    pub fn finish(self) -> Result<(), crate::LibError> {
         tracing::debug!("Finishing transaction for key '{:?}'", self.key);
         self.commit()
     }
 
-    fn commit(self) -> Result<(), crate::LibError<K>> {
+    fn commit(self) -> Result<(), crate::LibError> {
         use crate::LibIoOperation;
         use crate::types::{BlobHash, WalOp};
 
@@ -115,7 +115,7 @@ where
             .cas_inner
             .cas_manager
             .commit_blob(self.temp_file.path(), &blob_hash)
-            .map_err(|e| crate::LibError::Cas(e))?;
+            .map_err(crate::LibError::Cas)?;
 
         let op = WalOp::Put { key: self.key.clone(), hash: blob_hash };
         let to_delete = self.cas_inner.index.apply_wal_op(&op).map_err(crate::LibError::Index)?;
