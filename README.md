@@ -75,4 +75,4 @@ the process of committing.
 - [ ] Cache fd-s
 - [ ] Use mmap or allow to configure read mode
 - [ ] Lock index to disallow concurrent db open
-- [ ] Save settings in the separate file
+- [x] Save settings in the separate file

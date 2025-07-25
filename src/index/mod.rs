@@ -334,32 +334,33 @@ impl<K: Debug> Debug for Index<K> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Arc;
+
     use tempfile::tempdir;
-    use crate::{Config, test_utils::encoders::StringEncoder};
+
+    use super::*;
+    use crate::Config;
+    use crate::test_utils::encoders::StringEncoder;
 
     fn setup_test_index() -> (tempfile::TempDir, Index<String>) {
         let dir = tempdir().unwrap();
-        let index = Index::load(
-            dir.path().to_path_buf(),
-            Arc::new(StringEncoder),
-            Config::default(),
-        ).unwrap();
+        let index =
+            Index::load(dir.path().to_path_buf(), Arc::new(StringEncoder), Config::default())
+                .unwrap();
         (dir, index)
     }
 
     #[test]
     fn test_intent_guard_cleanup_direct_state() {
         let (_dir, index) = setup_test_index();
-        
+
         let key = "test_key".to_string();
         let hash = BlobHash::from_bytes([1; 32]);
-        
+
         // Before registering intent - no intents, no ref count
         assert_eq!(index.pending_intents.lock().len(), 0);
         assert_eq!(index.state.read().hash_to_ref_count.get(&hash), None);
-        
+
         // Register intent and verify state
         {
             let _guard = index.register_intent(key.clone(), hash).unwrap();
@@ -368,7 +369,7 @@ mod tests {
             assert_eq!(index.state.read().hash_to_ref_count.get(&hash), Some(&1));
         }
         // Guard dropped here - cleanup should happen
-        
+
         // After guard drop - intent removed, ref count decremented
         assert_eq!(index.pending_intents.lock().len(), 0);
         assert_eq!(index.state.read().hash_to_ref_count.get(&hash), None);
@@ -377,17 +378,17 @@ mod tests {
     #[test]
     fn test_intent_guard_multiple_intents_same_key_direct_state() {
         let (_dir, index) = setup_test_index();
-        
+
         let key = "test_key".to_string();
         let hash1 = BlobHash::from_bytes([1; 32]);
         let hash2 = BlobHash::from_bytes([2; 32]);
-        
+
         // First intent
         let _guard1 = index.register_intent(key.clone(), hash1).unwrap();
         assert_eq!(index.pending_intents.lock().len(), 1);
         assert_eq!(index.pending_intents.lock().get(&key), Some(&hash1));
         assert_eq!(index.state.read().hash_to_ref_count.get(&hash1), Some(&1));
-        
+
         // Second intent on same key - should replace first
         {
             let _guard2 = index.register_intent(key.clone(), hash2).unwrap();
@@ -398,7 +399,7 @@ mod tests {
             assert_eq!(index.state.read().hash_to_ref_count.get(&hash2), Some(&1));
         }
         // guard2 dropped - should restore hash1
-        
+
         // After guard2 drop - hash1 restored, hash2 removed
         assert_eq!(index.pending_intents.lock().len(), 1);
         assert_eq!(index.pending_intents.lock().get(&key), Some(&hash1));
@@ -409,16 +410,16 @@ mod tests {
     #[test]
     fn test_intent_guard_reference_counting_direct_state() {
         let (_dir, index) = setup_test_index();
-        
+
         let key1 = "key1".to_string();
         let key2 = "key2".to_string();
         let hash = BlobHash::from_bytes([1; 32]); // Same hash for both keys
-        
+
         // Register first intent
         let _guard1 = index.register_intent(key1.clone(), hash).unwrap();
         assert_eq!(index.pending_intents.lock().len(), 1);
         assert_eq!(index.state.read().hash_to_ref_count.get(&hash), Some(&1));
-        
+
         // Register second intent with same hash
         {
             let _guard2 = index.register_intent(key2.clone(), hash).unwrap();
@@ -426,7 +427,7 @@ mod tests {
             assert_eq!(index.state.read().hash_to_ref_count.get(&hash), Some(&2));
         }
         // guard2 dropped - ref count should decrease but not reach 0
-        
+
         // After guard2 drop - still one intent remaining
         assert_eq!(index.pending_intents.lock().len(), 1);
         assert_eq!(index.pending_intents.lock().get(&key1), Some(&hash));
@@ -436,20 +437,21 @@ mod tests {
     #[test]
     fn test_intent_guard_commit_removes_intent() {
         let (_dir, index) = setup_test_index();
-        
+
         let key = "test_key".to_string();
         let hash = BlobHash::from_bytes([1; 32]);
-        
+
         // Register intent
         let guard = index.register_intent(key.clone(), hash).unwrap();
         assert_eq!(index.pending_intents.lock().len(), 1);
         assert_eq!(index.state.read().hash_to_ref_count.get(&hash), Some(&1));
-        
+
         // Commit the guard
         let _to_delete = guard.commit().unwrap();
-        
+
         // After commit - intent removed but ref count preserved (WAL operation keeps it)
         assert_eq!(index.pending_intents.lock().len(), 0);
-        // Note: ref count would normally be managed by the WAL operation in apply_wal_op_with_intent
+        // Note: ref count would normally be managed by the WAL operation in
+        // apply_wal_op_with_intent
     }
 }

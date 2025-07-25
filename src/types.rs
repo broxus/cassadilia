@@ -106,11 +106,16 @@ pub enum SyncMode {
 pub struct Config {
     pub sync_mode: SyncMode,
     pub num_ops_per_wal: u64,
+    pub pre_create_cas_dirs: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { sync_mode: SyncMode::default(), num_ops_per_wal: 100_000 }
+        Config {
+            sync_mode: SyncMode::default(),
+            num_ops_per_wal: 100_000,
+            pre_create_cas_dirs: false,
+        }
     }
 }
 

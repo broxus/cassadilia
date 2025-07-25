@@ -20,6 +20,9 @@ mod types;
 mod wal;
 pub use types::*;
 
+mod settings;
+use settings::{DbSettings, SettingsError, SettingsPersister};
+
 #[cfg(test)]
 mod tests;
 
@@ -68,6 +71,9 @@ pub enum LibError {
     #[error("Index operation failed")]
     Index(IndexError),
 
+    #[error("Settings error")]
+    Settings(SettingsError),
+
     #[error("Key encoder operation failed")]
     KeyEncoderError(KeyEncoderError),
     #[error("Types error")]
@@ -76,6 +82,23 @@ pub enum LibError {
 
 pub fn calculate_blob_hash(blob_data: &[u8]) -> BlobHash {
     BlobHash(blake3::hash(blob_data).into())
+}
+
+fn pre_create_all_cas_directories(paths: &paths::DbPaths) -> Result<(), LibError> {
+    let cas_root = paths.cas_root_path();
+
+    for i in 0..256 {
+        for j in 0..256 {
+            let dir = cas_root.join(format!("{i:02x}")).join(format!("{j:02x}"));
+            std::fs::create_dir_all(&dir).map_err(|e| LibError::Io {
+                operation: LibIoOperation::CreateCasDir,
+                path: Some(dir),
+                source: e,
+            })?;
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -148,9 +171,42 @@ where
             source: e,
         })?;
 
-        let cas_manager = Arc::new(CasManager::new(paths.clone(), fs_lock.clone()));
-        let index =
-            Index::load(db_root, key_encoder, config.clone()).map_err(LibError::Index)?;
+        // Load or create settings
+        let settings_persister = SettingsPersister::new(paths.settings_path().to_path_buf());
+        let dir_tree_is_pre_created = match settings_persister.load().map_err(LibError::Settings)? {
+            Some(existing_settings) => {
+                // Validate immutable settings
+                if existing_settings.num_ops_per_wal != config.num_ops_per_wal {
+                    return Err(LibError::Settings(SettingsError::ValidationFailed(format!(
+                        "Cannot change num_ops_per_wal from {} to {} after database creation",
+                        existing_settings.num_ops_per_wal, config.num_ops_per_wal
+                    ))));
+                }
+                existing_settings.dir_tree_is_pre_created
+            }
+            None => {
+                // First time - create settings from config
+                let new_settings = DbSettings {
+                    version: settings::CURRENT_DB_VERSION,
+                    dir_tree_is_pre_created: config.pre_create_cas_dirs,
+                    num_ops_per_wal: config.num_ops_per_wal,
+                };
+
+                // Pre-create directories if requested
+                if config.pre_create_cas_dirs {
+                    tracing::info!("Pre-creating CAS directory tree...");
+                    pre_create_all_cas_directories(&paths)?;
+                    tracing::info!("Pre-created 65,536 CAS directories");
+                }
+
+                settings_persister.save(&new_settings).map_err(LibError::Settings)?;
+                new_settings.dir_tree_is_pre_created
+            }
+        };
+
+        let cas_manager =
+            Arc::new(CasManager::new(paths.clone(), fs_lock.clone(), dir_tree_is_pre_created));
+        let index = Index::load(db_root, key_encoder, config.clone()).map_err(LibError::Index)?;
 
         let datasync_channel = match config.sync_mode {
             SyncMode::Sync => None,
@@ -310,7 +366,10 @@ where
                                 operation_name
                             );
                             return if return_err_on_missing {
-                                Err(LibError::BlobDataMissing { key: format!("{key:?}"), hash: blob_hash })
+                                Err(LibError::BlobDataMissing {
+                                    key: format!("{key:?}"),
+                                    hash: blob_hash,
+                                })
                             } else {
                                 Ok(None)
                             };

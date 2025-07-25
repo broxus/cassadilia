@@ -7,7 +7,7 @@ use tempfile::tempdir;
 use super::*;
 use crate::paths::DbPaths;
 use crate::serialization::serialize_wal_op_raw;
-use crate::test_utils::encoders::{TestKeyEncoder, FailingKeyEncoder};
+use crate::test_utils::encoders::{FailingKeyEncoder, TestKeyEncoder};
 use crate::types::{BlobHash, WalOpRaw};
 
 // --- Test Setup ---

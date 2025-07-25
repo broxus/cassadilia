@@ -212,7 +212,8 @@ fn test_wal_rollover_and_cleanup() -> Result<()> {
     let db_path = dir.path();
 
     // Configure a very small WAL segment size to force rollovers.
-    let config = Config { sync_mode: SyncMode::Sync, num_ops_per_wal: 2 };
+    let config =
+        Config { sync_mode: SyncMode::Sync, num_ops_per_wal: 2, pre_create_cas_dirs: false };
 
     let wal0_path = db_path.join("0_index.wal");
     let wal1_path = db_path.join("1_index.wal");

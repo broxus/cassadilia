@@ -40,11 +40,12 @@ pub enum CasManagerError {
 pub struct CasManager {
     paths: paths::DbPaths,
     fs_lock: FsLock,
+    dir_tree_is_pre_created: bool,
 }
 
 impl CasManager {
-    pub fn new(paths: paths::DbPaths, fs_lock: FsLock) -> Self {
-        Self { paths, fs_lock }
+    pub fn new(paths: paths::DbPaths, fs_lock: FsLock, dir_tree_is_pre_created: bool) -> Self {
+        Self { paths, fs_lock, dir_tree_is_pre_created }
     }
 
     pub fn read_blob(&self, blob_hash: &BlobHash) -> Result<bytes::Bytes, CasManagerError> {
@@ -172,12 +173,15 @@ impl CasManager {
         let _lock = self.fs_lock.lock();
 
         // Create parent directory inside the lock to prevent races
-        if let Some(parent) = final_cas_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| CasManagerError::FileOperation {
-                operation: CasIoOperation::CreateSubdir,
-                path: final_cas_path.clone(),
-                source: e,
-            })?;
+        // Skip if directory tree was pre-created
+        if !self.dir_tree_is_pre_created {
+            if let Some(parent) = final_cas_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| CasManagerError::FileOperation {
+                    operation: CasIoOperation::CreateSubdir,
+                    path: final_cas_path.clone(),
+                    source: e,
+                })?;
+            }
         }
 
         if !final_cas_path.exists() {
