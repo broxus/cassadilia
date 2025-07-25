@@ -7,36 +7,10 @@ use tempfile::tempdir;
 use super::*;
 use crate::paths::DbPaths;
 use crate::serialization::serialize_wal_op_raw;
-use crate::types::{BlobHash, KeyEncoder, WalOpRaw};
+use crate::test_utils::encoders::{TestKeyEncoder, FailingKeyEncoder};
+use crate::types::{BlobHash, WalOpRaw};
 
 // --- Test Setup ---
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TestKey(pub u64);
-
-struct TestKeyEncoder;
-impl KeyEncoder<TestKey> for TestKeyEncoder {
-    fn encode(&self, key: &TestKey) -> Result<Vec<u8>, crate::types::KeyEncoderError> {
-        Ok(key.0.to_le_bytes().to_vec())
-    }
-    fn decode(&self, bytes: &[u8]) -> Result<TestKey, crate::types::KeyEncoderError> {
-        if bytes.len() < 8 {
-            return Err(crate::types::KeyEncoderError::DecodeError);
-        }
-        Ok(TestKey(u64::from_le_bytes(bytes[..8].try_into().unwrap())))
-    }
-}
-
-/// An encoder that always fails on decode, used for testing error paths.
-struct FailingKeyEncoder;
-impl KeyEncoder<TestKey> for FailingKeyEncoder {
-    fn encode(&self, _key: &TestKey) -> Result<Vec<u8>, crate::types::KeyEncoderError> {
-        Ok(vec![1, 2, 3])
-    }
-    fn decode(&self, _bytes: &[u8]) -> Result<TestKey, crate::types::KeyEncoderError> {
-        Err(crate::types::KeyEncoderError::DecodeError)
-    }
-}
 
 fn setup_wal_manager(num_ops_per_wal: u64) -> (WalManager, tempfile::TempDir) {
     let dir = tempdir().unwrap();
@@ -266,15 +240,15 @@ fn checkpoint_load_fails_on_read_io_error() {
 
     // Create the checkpoint file.
     let checkpoint_path = paths.checkpoint_meta_path();
-    std::fs::write(&checkpoint_path, "123").unwrap();
+    std::fs::write(checkpoint_path, "123").unwrap();
 
     // Make it unreadable to trigger a read error.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&checkpoint_path).unwrap().permissions();
+        let mut perms = std::fs::metadata(checkpoint_path).unwrap().permissions();
         perms.set_mode(0o000); // No permissions.
-        std::fs::set_permissions(&checkpoint_path, perms).unwrap();
+        std::fs::set_permissions(checkpoint_path, perms).unwrap();
 
         let persister = CheckpointPersister::new(&paths);
         let result = persister.load();

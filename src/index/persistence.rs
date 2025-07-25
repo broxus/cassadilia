@@ -41,7 +41,7 @@ impl<'a> IndexStatePersister<'a> {
         let index_path = self.paths.index_file_path();
         let mut state = IndexState::new();
 
-        match std::fs::read(&index_path) {
+        match std::fs::read(index_path) {
             Ok(data) => {
                 if data.is_empty() {
                     tracing::info!(
@@ -100,7 +100,7 @@ impl<'a> IndexStatePersister<'a> {
 
         let data_bytes = serialize_btreemap_bytes_to_hash(&key_bytes_to_hash)?;
 
-        atomically_write_file_bytes(&index_path, &index_tmp_path, &data_bytes)?;
+        atomically_write_file_bytes(index_path, index_tmp_path, &data_bytes)?;
 
         tracing::info!(
             "Persisted {} entries to index '{}'",

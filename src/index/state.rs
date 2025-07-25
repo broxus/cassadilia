@@ -12,7 +12,7 @@ pub enum IndexStateError {
     HashNotFoundForDecrement { hash: BlobHash },
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct IndexState<K> {
     pub(crate) key_to_hash: BTreeMap<K, BlobHash>,
     pub(crate) hash_to_ref_count: HashMap<BlobHash, u32>,
@@ -62,7 +62,7 @@ where
         *self.hash_to_ref_count.entry(*hash).or_insert(0) += 1;
     }
 
-    fn decrement_ref(
+    pub(crate) fn decrement_ref(
         &mut self,
         hash_to_decrement: &BlobHash,
     ) -> Result<Option<BlobHash>, IndexStateError> {

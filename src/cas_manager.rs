@@ -169,6 +169,9 @@ impl CasManager {
     ) -> Result<PathBuf, CasManagerError> {
         let final_cas_path = self.paths.cas_file_path(blob_hash);
 
+        let _lock = self.fs_lock.lock();
+
+        // Create parent directory inside the lock to prevent races
         if let Some(parent) = final_cas_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| CasManagerError::FileOperation {
                 operation: CasIoOperation::CreateSubdir,
@@ -177,7 +180,6 @@ impl CasManager {
             })?;
         }
 
-        let _lock = self.fs_lock.lock();
         if !final_cas_path.exists() {
             std::fs::rename(staging_path, &final_cas_path).map_err(|e| {
                 CasManagerError::FileOperation {

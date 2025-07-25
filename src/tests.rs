@@ -5,31 +5,8 @@ use anyhow::Result;
 use tempfile::tempdir;
 
 use crate::index::{CHECKPOINT_META_FILENAME, IndexError};
-use crate::{Cas, Config, KeyEncoder, KeyEncoderError, LibError, LibIoOperation, SyncMode};
-
-#[derive(Debug, Default, Clone)]
-struct StringEncoder;
-impl KeyEncoder<String> for StringEncoder {
-    fn encode(&self, key: &String) -> Result<Vec<u8>, KeyEncoderError> {
-        Ok(key.as_bytes().to_vec())
-    }
-
-    #[allow(clippy::map_err_ignore)]
-    fn decode(&self, data: &[u8]) -> Result<String, KeyEncoderError> {
-        String::from_utf8(data.to_vec()).map_err(|_| KeyEncoderError::DecodeError)
-    }
-}
-
-#[derive(Debug, Default, Clone)]
-struct VecU8Encoder;
-impl KeyEncoder<Vec<u8>> for VecU8Encoder {
-    fn encode(&self, key: &Vec<u8>) -> Result<Vec<u8>, KeyEncoderError> {
-        Ok(key.clone())
-    }
-    fn decode(&self, data: &[u8]) -> Result<Vec<u8>, KeyEncoderError> {
-        Ok(data.to_vec())
-    }
-}
+use crate::test_utils::encoders::{StringEncoder, VecU8Encoder};
+use crate::{Cas, Config, LibError, LibIoOperation, SyncMode};
 
 fn setup_tracing() {
     let _ = tracing_subscriber::fmt::fmt()
@@ -321,7 +298,7 @@ fn test_api_on_nonexistent_key() -> Result<()> {
 
     let result = cas.raw_bufreader(&key);
     match result {
-        Err(LibError::Index(IndexError::KeyNotFound { .. })) => {},
+        Err(LibError::Index(IndexError::KeyNotFound { .. })) => {}
         _ => panic!("Expected KeyNotFound error, got: {result:?}"),
     }
 

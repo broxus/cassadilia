@@ -23,6 +23,9 @@ pub use types::*;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+pub mod test_utils;
+
 mod index;
 use index::Index;
 
@@ -88,7 +91,7 @@ impl<K> Deref for Cas<K> {
 
 impl<K> Cas<K>
 where
-    K: Clone + Eq + Ord + Debug + Send + Sync + 'static,
+    K: Clone + Eq + Ord + std::hash::Hash + Debug + Send + Sync + 'static,
 {
     pub fn open(
         db_root: impl AsRef<Path>,
@@ -122,7 +125,7 @@ where
 
 impl<K> CasInner<K>
 where
-    K: Clone + Eq + Ord + Debug + Send + Sync + 'static,
+    K: Clone + Eq + Ord + std::hash::Hash + Debug + Send + Sync + 'static,
 {
     fn new(
         db_root: PathBuf,

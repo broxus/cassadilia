@@ -51,13 +51,13 @@ where
 
 impl<'a, K> Transaction<'a, K>
 where
-    K: Clone + Eq + Ord + Debug + Send + Sync + 'static,
+    K: Clone + Eq + Ord + std::hash::Hash + Debug + Send + Sync + 'static,
 {
     pub(crate) fn new(cas_inner: &'a CasInner<K>, key: K) -> Result<Self, TransactionError> {
         let staging_dir = cas_inner.paths.staging_root_path();
 
         let temp_file =
-            NamedTempFile::new_in(&staging_dir).map_err(|e| TransactionError::StagingFileIo {
+            NamedTempFile::new_in(staging_dir).map_err(|e| TransactionError::StagingFileIo {
                 operation: StagingFileOp::Create,
                 path: staging_dir.to_path_buf(),
                 source: e,
@@ -103,7 +103,7 @@ where
 
     fn commit(self) -> Result<(), crate::LibError> {
         use crate::LibIoOperation;
-        use crate::types::{BlobHash, WalOp};
+        use crate::types::BlobHash;
 
         let file_to_sync = self.writer.into_inner().map_err(|e| crate::LibError::Io {
             operation: LibIoOperation::CommitFlushWriter,
@@ -113,14 +113,22 @@ where
         self.cas_inner.fdatasync(file_to_sync)?;
 
         let blob_hash = BlobHash::from_bytes(*self.hasher.finalize().as_bytes());
+
+        // Register intent - returns a guard that will cleanup on drop if not committed
+        let intent_guard = self
+            .cas_inner
+            .index
+            .register_intent(self.key.clone(), blob_hash)
+            .map_err(crate::LibError::Index)?;
+
         let _cas_path = self
             .cas_inner
             .cas_manager
             .commit_blob(self.temp_file.path(), &blob_hash)
             .map_err(crate::LibError::Cas)?;
 
-        let op = WalOp::Put { key: self.key.clone(), hash: blob_hash };
-        let to_delete = self.cas_inner.index.apply_wal_op(&op).map_err(crate::LibError::Index)?;
+        // Commit the intent - this applies the WAL operation and removes the intent
+        let to_delete = intent_guard.commit().map_err(crate::LibError::Index)?;
 
         self.cas_inner.cas_manager.delete_blobs(&to_delete).map_err(crate::LibError::Cas)?;
 
