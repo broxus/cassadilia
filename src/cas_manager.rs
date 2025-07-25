@@ -119,15 +119,46 @@ impl CasManager {
             return Ok(bytes::Bytes::new());
         }
 
-        let mut buff = vec![0; read_len as usize];
-        let bytes_read =
-            file.read_at(&mut buff, start).map_err(|e| CasManagerError::FileOperation {
-                operation: CasIoOperation::ReadRange,
-                path: cas_path.clone(),
-                source: e,
-            })?;
+        // Create a Vec with capacity but zero length
+        let mut buff = Vec::with_capacity(read_len as usize);
 
-        buff.truncate(bytes_read);
+        let mut total_bytes_read = 0;
+        let mut current_offset = start;
+
+        // Read in a loop until we've read all requested bytes or hit EOF
+        while total_bytes_read < read_len as usize {
+            // Get the spare capacity (uninitialized portion) of the vector
+            let spare = buff.spare_capacity_mut();
+            let remaining = std::cmp::min(spare.len(), read_len as usize - total_bytes_read);
+
+            // SAFETY: We're reading into uninitialized memory, which is safe as long as we
+            // only update the length by the amount actually read
+            let bytes_read = unsafe {
+                let ptr = spare.as_mut_ptr().cast::<u8>();
+                let slice = std::slice::from_raw_parts_mut(ptr, remaining);
+
+                file.read_at(slice, current_offset).map_err(|e| CasManagerError::FileOperation {
+                    operation: CasIoOperation::ReadRange,
+                    path: cas_path.clone(),
+                    source: e,
+                })?
+            };
+
+            // EOF reached
+            if bytes_read == 0 {
+                break;
+            }
+
+            // SAFETY: We've initialized exactly bytes_read bytes in the spare capacity
+            unsafe {
+                let new_len = buff.len() + bytes_read;
+                buff.set_len(new_len);
+            }
+
+            total_bytes_read += bytes_read;
+            current_offset += bytes_read as u64;
+        }
+
         Ok(bytes::Bytes::from(buff))
     }
 

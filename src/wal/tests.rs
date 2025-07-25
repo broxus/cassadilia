@@ -96,8 +96,7 @@ fn append_op_fails_when_segment_rollover_cannot_create_file() {
         // The error occurs when trying to open the new segment file for writing.
         assert!(
             matches!(result, Err(WalError::Io { operation: WalIoOperation::OpenSegmentWrite, .. })),
-            "Expected an OpenSegmentWrite I/O error, but got {:?}",
-            result
+            "Expected an OpenSegmentWrite I/O error, but got {result:?}",
         );
 
         // Cleanup: Restore permissions so the tempdir can be deleted.
@@ -188,8 +187,7 @@ fn replay_fails_on_corrupted_op_entry() {
 
     assert!(
         matches!(result, Err(WalError::ReplayIo { step: WalReplayIoStep::ReadOpData, .. })),
-        "Expected a ReplayIo::ReadOpData error, but got {:?}",
-        result
+        "Expected a ReplayIo::ReadOpData error, but got {result:?}",
     );
 }
 

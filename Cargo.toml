@@ -1,7 +1,7 @@
 [package]
 name = "cassadilia"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 blake3 = "1"
@@ -68,7 +68,6 @@ manual_ok_or = "warn"
 map_err_ignore = "warn"
 map_flatten = "warn"
 map_unwrap_or = "warn"
-match_on_vec_items = "warn"
 match_same_arms = "warn"
 match_wild_err_arm = "warn"
 match_wildcard_for_single_variants = "warn"

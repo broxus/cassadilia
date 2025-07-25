@@ -285,8 +285,8 @@ fn test_remove_range_persists() -> Result<()> {
     {
         let cas = Cas::open(db_path, StringEncoder, Config::default())?;
         for i in 1..=4 {
-            let mut tx = cas.put(format!("key_{}", i))?;
-            tx.write(format!("data_{}", i).as_bytes())?;
+            let mut tx = cas.put(format!("key_{i}"))?;
+            tx.write(format!("data_{i}",).as_bytes())?;
             tx.finish()?;
         }
 
@@ -322,7 +322,7 @@ fn test_api_on_nonexistent_key() -> Result<()> {
     let result = cas.raw_bufreader(&key);
     match result {
         Err(LibError::Index(IndexError::KeyNotFound { key: k })) => assert_eq!(k, key),
-        _ => panic!("Expected KeyNotFound error, got: {:?}", result),
+        _ => panic!("Expected KeyNotFound error, got: {result:?}"),
     }
 
     // High-level APIs should gracefully return None.
@@ -352,7 +352,7 @@ fn test_io_error_on_staging_file_creation() -> anyhow::Result<()> {
             let path_str = path.unwrap().to_string_lossy().to_string();
             assert!(path_str.contains("staging"));
         }
-        other_error => panic!("Expected a specific IO error, but got: {}", other_error),
+        other_error => panic!("Expected a specific IO error, but got: {other_error}",),
     }
 
     Ok(())
