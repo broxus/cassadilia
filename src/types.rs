@@ -1,7 +1,7 @@
 use std::fmt;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -27,15 +27,37 @@ impl BlobHash {
         Ok(Self(bytes))
     }
 
+    /// Returns the relative path for this blob hash, suitable for storing in a directory structure.
+    /// The path will have 2 levels /h/a/sh
     pub fn relative_path(&self) -> PathBuf {
         let hex = self.to_hex();
-        if hex.len() >= 4 {
-            let prefix1 = &hex[0..2];
-            let prefix2 = &hex[2..4];
-            PathBuf::from(prefix1).join(prefix2).join(&hex)
-        } else {
-            PathBuf::from(hex)
+        let top_level_dir = &hex[0..2];
+        // Use the next 2 characters for the second-level directory.
+        let second_level_dir = &hex[2..4];
+        // The rest of the hash becomes the filename.
+        let truncated_filename = &hex[4..];
+
+        // Join the parts to form the final path: "ab/12/cdef..."
+        PathBuf::from(top_level_dir).join(second_level_dir).join(truncated_filename)
+    }
+
+    pub fn from_relative_path(path: &Path) -> Result<Self, TypesError> {
+        let components: Vec<_> = path.components().collect();
+        if components.len() < 3 {
+            return Err(TypesError::InvalidHashFormat(hex::FromHexError::InvalidStringLength));
         }
+        let last_3 = &components[components.len() - 3..];
+        let mut buf = Vec::with_capacity(HASH_SIZE * 2);
+
+        for component in last_3.iter() {
+            let component = component.as_os_str().as_encoded_bytes();
+            buf.extend_from_slice(component);
+        }
+
+        let mut res = [0u8; HASH_SIZE];
+        hex::decode_to_slice(&buf, &mut res).map_err(TypesError::InvalidHashFormat)?;
+
+        Ok(Self(res))
     }
 
     pub fn from_bytes(bytes: [u8; HASH_SIZE]) -> Self {
@@ -92,7 +114,7 @@ pub trait KeyEncoder<K>: Send + Sync + 'static {
     fn decode(&self, data: &[u8]) -> Result<K, KeyEncoderError>;
 }
 
-// ========== config ==========
+// === config ===
 #[derive(Clone, Copy, Debug, Default)]
 pub enum SyncMode {
     /// Waits for fdatasync
@@ -106,7 +128,14 @@ pub enum SyncMode {
 pub struct Config {
     pub sync_mode: SyncMode,
     pub num_ops_per_wal: u64,
+    /// Whether to pre-create directories for CAS blobs
+    /// Will create 65k dirs on the first run
     pub pre_create_cas_dirs: bool,
+    /// Whether to scan for orphaned blobs on startup
+    pub scan_orphans_on_startup: bool,
+    /// Also verify blob integrity during the orphan scan
+    pub verify_blob_integrity: bool,
+    pub fail_on_integrity_errors: bool,
 }
 
 impl Default for Config {
@@ -115,11 +144,17 @@ impl Default for Config {
             sync_mode: SyncMode::default(),
             num_ops_per_wal: 100_000,
             pre_create_cas_dirs: false,
+            scan_orphans_on_startup: true,
+            verify_blob_integrity: false,
+            fail_on_integrity_errors: true,
         }
     }
 }
 
-// ========== core ops ==========
+// === orphan recovery ===
+// Moved to orphan.rs
+
+// === core ops ===
 
 #[derive(Debug, Clone)]
 pub enum WalOpRaw {
@@ -211,7 +246,7 @@ pub enum TypesError {
     },
 }
 
-// ========== WAL ==========
+// === WAL ===
 
 /// Represents the checkpoint state of the WAL
 pub(crate) type CheckpointState = Option<u64>;
@@ -235,7 +270,7 @@ impl SegmentInfo {
     }
 }
 
-// ==========  Utility Types ==========
+// ===  Utility Types ===
 
 #[derive(Clone, Debug)]
 pub(crate) struct FsLock {
@@ -249,5 +284,114 @@ impl FsLock {
 
     pub(crate) fn lock(&self) -> parking_lot::MutexGuard<'_, ()> {
         self.lock.lock()
+    }
+
+    pub(crate) fn lock_arc(&self) -> parking_lot::ArcMutexGuard<parking_lot::RawMutex, ()> {
+        self.lock.clone().lock_arc()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_blob_hash_relative_path_roundtrip() {
+        // Test that converting to relative path and back gives the same hash
+        let original_hex = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        let hash = BlobHash::from_hex(original_hex).unwrap();
+
+        let relative_path = hash.relative_path();
+        let reconstructed = BlobHash::from_relative_path(&relative_path).unwrap();
+
+        assert_eq!(hash, reconstructed);
+        assert_eq!(hash.to_hex(), reconstructed.to_hex());
+    }
+
+    #[test]
+    fn test_blob_hash_from_relative_path_valid_cases() {
+        // Create test hashes using proper generation
+        let zero_hash = BlobHash([0u8; HASH_SIZE]);
+        let ff_hash = BlobHash([0xffu8; HASH_SIZE]);
+
+        // Create a test hash with known pattern
+        let mut test_bytes = [0u8; HASH_SIZE];
+        for (i, byte) in test_bytes.iter_mut().enumerate() {
+            *byte = (i % 256) as u8;
+        }
+        let test_hash = BlobHash(test_bytes);
+
+        // Test that from_relative_path correctly reconstructs these hashes
+        for hash in &[zero_hash, ff_hash, test_hash] {
+            let path = hash.relative_path();
+            let reconstructed = BlobHash::from_relative_path(&path).unwrap();
+            assert_eq!(hash, &reconstructed);
+        }
+
+        // Test with leading path components
+        let hash = BlobHash([0x12u8; HASH_SIZE]);
+        let relative = hash.relative_path();
+        let full_path = PathBuf::from("/var/data/cas").join(&relative);
+        let reconstructed = BlobHash::from_relative_path(&full_path).unwrap();
+        assert_eq!(hash, reconstructed);
+    }
+
+    #[test]
+    fn test_blob_hash_from_relative_path_error_cases() {
+        // Test invalid path structures
+        let invalid_paths = vec![
+            // Too few components
+            PathBuf::from("ab/cdef1234"),
+            PathBuf::from("abcdef1234"),
+            PathBuf::from(""),
+            // Invalid hex in components
+            PathBuf::from("zz/cd/ef1234567890abcdef1234567890abcdef1234567890abcdef12345678"),
+            PathBuf::from("ab/zz/ef1234567890abcdef1234567890abcdef1234567890abcdef12345678"),
+            PathBuf::from("ab/cd/zz1234567890abcdef1234567890abcdef1234567890abcdef12345678"),
+            // Wrong length (not 64 hex chars total)
+            PathBuf::from("ab/cd/ef12"),
+            PathBuf::from("ab/cd/ef1234567890abcdef1234567890abcdef1234567890abcdef123456789"), /* 65 chars */
+        ];
+
+        for path in invalid_paths {
+            assert!(
+                BlobHash::from_relative_path(&path).is_err(),
+                "Expected error for path: {path:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_blob_hash_relative_path_structure() {
+        // Test that relative_path creates the expected structure
+        let hash =
+            BlobHash::from_hex("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+                .unwrap();
+
+        let path = hash.relative_path();
+        let components: Vec<_> =
+            path.components().map(|c| c.as_os_str().to_str().unwrap()).collect();
+
+        assert_eq!(components.len(), 3);
+        assert_eq!(components[0], "12");
+        assert_eq!(components[1], "34");
+        assert_eq!(components[2], "567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+    }
+
+    #[test]
+    fn test_blob_hash_from_relative_path_with_prefix() {
+        // Create a proper hash using byte array
+        let hash = BlobHash([0xabu8; HASH_SIZE]);
+        let relative = hash.relative_path();
+
+        // Test that only the last 3 components are used
+        let long_path = PathBuf::from("/var/data/cas").join(&relative);
+        let short_path = relative.clone();
+
+        let hash1 = BlobHash::from_relative_path(&long_path).unwrap();
+        let hash2 = BlobHash::from_relative_path(&short_path).unwrap();
+
+        assert_eq!(hash1, hash2);
+        assert_eq!(hash1, hash);
     }
 }

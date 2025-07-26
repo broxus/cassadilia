@@ -212,8 +212,12 @@ fn test_wal_rollover_and_cleanup() -> Result<()> {
     let db_path = dir.path();
 
     // Configure a very small WAL segment size to force rollovers.
-    let config =
-        Config { sync_mode: SyncMode::Sync, num_ops_per_wal: 2, pre_create_cas_dirs: false };
+    let config = Config {
+        sync_mode: SyncMode::Sync,
+        num_ops_per_wal: 2,
+        pre_create_cas_dirs: false,
+        ..Default::default()
+    };
 
     let wal0_path = db_path.join("0_index.wal");
     let wal1_path = db_path.join("1_index.wal");
@@ -332,6 +336,275 @@ fn test_io_error_on_staging_file_creation() -> anyhow::Result<()> {
         }
         other_error => panic!("Expected a specific IO error, but got: {other_error}",),
     }
+
+    Ok(())
+}
+
+#[test]
+fn test_orphan_detection_and_cleanup() -> Result<()> {
+    setup_tracing();
+    let dir = tempdir()?;
+
+    // First, create a CAS with some valid data
+    let cas = Cas::open(dir.path(), StringEncoder, Config::default())?;
+
+    // Add some valid data
+    let key1 = "valid_key1".to_string();
+    let data1 = b"valid data 1";
+    let mut tx = cas.put(key1.clone())?;
+    tx.write(data1)?;
+    tx.finish()?;
+
+    // Get the hash for later
+    let _valid_hash = cas.get_hash_for_key(&key1).unwrap();
+
+    // Now create an orphaned blob by writing directly to CAS
+    let orphan_data = b"orphaned data";
+    let orphan_hash = crate::calculate_blob_hash(orphan_data);
+    let orphan_path = dir.path().join("cas").join(orphan_hash.relative_path());
+
+    // Create parent directories
+    if let Some(parent) = orphan_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&orphan_path, orphan_data)?;
+
+    // Also create an invalid file in CAS
+    let invalid_file_path = dir.path().join("cas").join(".DS_Store");
+    fs::write(&invalid_file_path, b"invalid")?;
+
+    // Create an old staging file
+    let staging_file = dir.path().join("staging").join("old_file.tmp");
+    fs::write(&staging_file, b"old staging data")?;
+
+    // Drop the CAS to ensure clean shutdown
+    drop(cas);
+
+    // Reopen with recovery to get orphan stats
+    let config = Config { scan_orphans_on_startup: true, ..Default::default() };
+    let (cas, orphan_stats) = Cas::open_with_recover(dir.path(), StringEncoder, config)?;
+
+    // Should have orphan stats
+    let stats = orphan_stats.expect("Should have orphan stats");
+    assert_eq!(stats.orphaned_blobs.len(), 1);
+    assert_eq!(stats.orphaned_blobs[0], orphan_hash);
+    assert_eq!(stats.invalid_files.len(), 1);
+
+    // Valid blob should still exist
+    let retrieved = cas.get(&key1)?.expect("valid blob should still exist");
+    assert_eq!(retrieved.as_ref(), data1);
+
+    // Orphan should still exist (not auto-deleted)
+    assert!(orphan_path.exists(), "orphaned blob should still exist before cleanup");
+
+    // Now explicitly delete orphans
+    let result = stats.delete_orphans()?;
+    assert_eq!(result.orphans_deleted, 1);
+    assert_eq!(result.invalid_files_removed, 1);
+
+    // Verify orphaned blob was removed
+    assert!(!orphan_path.exists(), "orphaned blob should be removed after cleanup");
+    assert!(!invalid_file_path.exists(), "invalid file should be removed after cleanup");
+
+    Ok(())
+}
+
+#[test]
+fn test_orphan_detection_with_integrity_check() -> Result<()> {
+    setup_tracing();
+    let dir = tempdir()?;
+
+    // Create a CAS with some valid data
+    let cas = Cas::open(dir.path(), StringEncoder, Config::default())?;
+
+    let key1 = "valid_key1".to_string();
+    let data1 = b"valid data 1";
+    let mut tx = cas.put(key1.clone())?;
+    tx.write(data1)?;
+    tx.finish()?;
+
+    let valid_hash = cas.get_hash_for_key(&key1).unwrap();
+    let valid_path = dir.path().join("cas").join(valid_hash.relative_path());
+
+    // Corrupt the blob by modifying its contents
+    fs::write(&valid_path, b"corrupted data")?;
+
+    drop(cas);
+
+    // Reopen with integrity check enabled
+    let config = Config {
+        scan_orphans_on_startup: true,
+        verify_blob_integrity: true,
+        fail_on_integrity_errors: true,
+        ..Default::default()
+    };
+
+    let result = Cas::open(dir.path(), StringEncoder, config);
+
+    // Should fail due to corrupted blob
+    match result {
+        Err(LibError::IntegrityCheckFailed { corrupted_blobs, .. }) => {
+            assert_eq!(corrupted_blobs.len(), 1);
+            assert_eq!(corrupted_blobs[0], valid_hash);
+        }
+        _ => panic!("Expected IntegrityCheckFailed error"),
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_orphan_detection_with_missing_blobs() -> Result<()> {
+    setup_tracing();
+    let dir = tempdir()?;
+
+    // Create a CAS with some data
+    let cas = Cas::open(dir.path(), StringEncoder, Config::default())?;
+
+    let key1 = "key1".to_string();
+    let data1 = b"data 1";
+    let mut tx = cas.put(key1.clone())?;
+    tx.write(data1)?;
+    tx.finish()?;
+
+    let hash1 = cas.get_hash_for_key(&key1).unwrap();
+    let blob_path = dir.path().join("cas").join(hash1.relative_path());
+
+    // Delete the blob file to simulate missing blob
+    fs::remove_file(&blob_path)?;
+
+    drop(cas);
+
+    // Reopen with cleanup
+    let config = Config {
+        scan_orphans_on_startup: true,
+        fail_on_integrity_errors: true,
+        ..Default::default()
+    };
+
+    let result = Cas::open(dir.path(), StringEncoder, config);
+
+    // Should fail due to missing blob
+    match result {
+        Err(LibError::IntegrityCheckFailed { missing_blobs, .. }) => {
+            assert_eq!(missing_blobs.len(), 1);
+            assert_eq!(missing_blobs[0], hash1);
+        }
+        _ => panic!("Expected IntegrityCheckFailed error"),
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_orphan_quarantine() -> Result<()> {
+    setup_tracing();
+    let dir = tempdir()?;
+    let quarantine_dir = dir.path().join("quarantine");
+
+    let cas = Cas::open(dir.path(), StringEncoder, Config::default())?;
+
+    // Add valid data
+    let key1 = "key1".to_string();
+    let data1 = b"data 1";
+    let mut tx = cas.put(key1.clone())?;
+    tx.write(data1)?;
+    tx.finish()?;
+
+    // Create orphaned blob
+    let orphan_data = b"orphan";
+    let orphan_hash = crate::calculate_blob_hash(orphan_data);
+    let orphan_path = dir.path().join("cas").join(orphan_hash.relative_path());
+    if let Some(parent) = orphan_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&orphan_path, orphan_data)?;
+
+    drop(cas);
+
+    // Reopen with recovery
+    let config = Config { scan_orphans_on_startup: true, ..Default::default() };
+    let (_cas, orphan_stats) = Cas::open_with_recover(dir.path(), StringEncoder, config)?;
+    let stats = orphan_stats.expect("Should have orphan stats");
+
+    // Quarantine orphans
+    let result = stats.quarantine_orphans(&quarantine_dir)?;
+    assert_eq!(result.orphans_quarantined, 1);
+
+    // Verify orphan was moved to quarantine
+    assert!(!orphan_path.exists());
+    assert!(quarantine_dir.join(orphan_hash.to_string()).exists());
+
+    Ok(())
+}
+
+#[test]
+fn test_orphan_stats_holds_lock() -> Result<()> {
+    setup_tracing();
+    let dir = tempdir()?;
+
+    // Create CAS with orphaned blob
+    let cas = Cas::open(dir.path(), StringEncoder, Config::default())?;
+
+    let orphan_data = b"orphan";
+    let orphan_hash = crate::calculate_blob_hash(orphan_data);
+    let orphan_path = dir.path().join("cas").join(orphan_hash.relative_path());
+    if let Some(parent) = orphan_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&orphan_path, orphan_data)?;
+
+    drop(cas);
+
+    // Reopen with recovery
+    let config = Config { scan_orphans_on_startup: true, ..Default::default() };
+    let (_cas, orphan_stats) = Cas::open_with_recover(dir.path(), StringEncoder, config)?;
+    let stats = orphan_stats.expect("Should have orphan stats");
+
+    assert_eq!(stats.orphaned_blobs.len(), 1);
+
+    // Note: We cannot do any CAS operations while holding OrphanStats
+    // because it holds the filesystem lock for its entire lifetime.
+    // This is by design to ensure consistency during cleanup.
+
+    // Now delete orphans
+    let result = stats.delete_orphans()?;
+    assert_eq!(result.orphans_deleted, 1);
+    assert!(!orphan_path.exists());
+
+    // Drop stats to release the lock
+    drop(stats);
+
+    Ok(())
+}
+
+#[test]
+fn test_cleanup_disabled() -> Result<()> {
+    setup_tracing();
+    let dir = tempdir()?;
+
+    let cas = Cas::open(dir.path(), StringEncoder, Config::default())?;
+
+    // Create orphaned blob
+    let orphan_data = b"orphan";
+    let orphan_hash = crate::calculate_blob_hash(orphan_data);
+    let orphan_path = dir.path().join("cas").join(orphan_hash.relative_path());
+    if let Some(parent) = orphan_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&orphan_path, orphan_data)?;
+
+    drop(cas);
+
+    // Reopen with cleanup disabled
+    let config = Config { scan_orphans_on_startup: false, ..Default::default() };
+    let (_cas, orphan_stats) = Cas::open_with_recover(dir.path(), StringEncoder, config)?;
+
+    // Should have no orphan stats
+    assert!(orphan_stats.is_none());
+
+    // Orphan should still exist
+    assert!(orphan_path.exists(), "orphan should not be removed when cleanup is disabled");
 
     Ok(())
 }

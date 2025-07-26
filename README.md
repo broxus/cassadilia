@@ -69,10 +69,10 @@ the process of committing.
 
 ## Todo
 
-- [ ] Gather orphaned blobs on startup.
-- [ ] Allow to check blobs integrity.
+- [x] Gather orphaned blobs on startup.
+- [x] Allow to check blobs integrity.
 - [ ] Gc empty directories
 - [ ] Cache fd-s
 - [ ] Use mmap or allow to configure read mode
-- [ ] Lock index to disallow concurrent db open
+- [ ] Lock index file to disallow concurrent db open
 - [x] Save settings in the separate file

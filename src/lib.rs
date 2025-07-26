@@ -20,6 +20,9 @@ mod types;
 mod wal;
 pub use types::*;
 
+mod orphan;
+pub use orphan::{OrphanStats, RecoveryResult};
+
 mod settings;
 use settings::{DbSettings, SettingsError, SettingsPersister};
 
@@ -45,6 +48,9 @@ pub enum LibIoOperation {
     CommitFlushWriter,
     CreateStagingFile,
     WriteStagingFile,
+    ReadDir,
+    RemoveFile,
+    ReadContent,
 }
 
 #[derive(Error, Debug)]
@@ -78,6 +84,14 @@ pub enum LibError {
     KeyEncoderError(KeyEncoderError),
     #[error("Types error")]
     TypesError(TypesError),
+
+    #[error("Integrity check failed: {missing} missing blobs, {corrupted} corrupted blobs")]
+    IntegrityCheckFailed {
+        missing_blobs: Vec<BlobHash>,
+        corrupted_blobs: Vec<BlobHash>,
+        missing: usize,
+        corrupted: usize,
+    },
 }
 
 pub fn calculate_blob_hash(blob_data: &[u8]) -> BlobHash {
@@ -121,16 +135,65 @@ where
         key_encoder: impl KeyEncoder<K> + 'static,
         config: Config,
     ) -> Result<Self, LibError> {
-        let inner = CasInner::new(db_root.as_ref().to_path_buf(), key_encoder, config)?;
-        Ok(Self(Arc::new(inner)))
+        // Use open_with_recover internally and drop the stats
+        let fail_on_integrity_errors = config.fail_on_integrity_errors;
+        let (cas, orphan_stats) = Self::open_with_recover(db_root, key_encoder, config)?;
+
+        // Log orphan info if stats were collected
+        if let Some(stats) = orphan_stats {
+            tracing::info!(
+                orphans = stats.orphaned_blobs.len(),
+                invalid_files = stats.invalid_files.len(),
+                missing_blobs = stats.missing_blobs.len(),
+                corrupted_blobs = stats.corrupted_blobs.len(),
+                staging_files = stats.staging_files.len(),
+                scan_time = stats.scan_duration.as_secs_f64(),
+                total_blobs = stats.total_blobs,
+                "Orphan scan complete"
+            );
+
+            // Check for critical issues
+            if fail_on_integrity_errors
+                && (!stats.missing_blobs.is_empty() || !stats.corrupted_blobs.is_empty())
+            {
+                return Err(LibError::IntegrityCheckFailed {
+                    missing_blobs: stats.missing_blobs.clone(),
+                    corrupted_blobs: stats.corrupted_blobs.clone(),
+                    missing: stats.missing_blobs.len(),
+                    corrupted: stats.corrupted_blobs.len(),
+                });
+            }
+        }
+
+        Ok(cas)
+    }
+
+    /// Open database and return orphan stats if scanning is enabled.
+    /// Will hold a lock on the CAS directory while `OrphanStats` is alive.
+    pub fn open_with_recover(
+        db_root: impl AsRef<Path>,
+        key_encoder: impl KeyEncoder<K> + 'static,
+        config: Config,
+    ) -> Result<(Self, Option<OrphanStats<K>>), LibError> {
+        let inner = CasInner::new(db_root.as_ref().to_path_buf(), key_encoder, config.clone())?;
+        let cas = Self(Arc::new(inner));
+
+        let orphan_stats = if config.scan_orphans_on_startup {
+            let stats = orphan::scan_orphans(&cas.0, cas.0.clone(), config.verify_blob_integrity)?;
+            Some(stats)
+        } else {
+            None
+        };
+
+        Ok((cas, orphan_stats))
     }
 }
 
 pub struct CasInner<K> {
-    paths: paths::DbPaths,
-    index: Index<K>,
+    pub(crate) paths: paths::DbPaths,
+    pub(crate) index: Index<K>,
     datasync_channel: Option<std::sync::mpsc::Sender<File>>,
-    cas_manager: Arc<CasManager>,
+    pub(crate) cas_manager: Arc<CasManager>,
 }
 
 impl<K> Debug for CasInner<K>

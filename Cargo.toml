@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-blake3 = "1"
+blake3 = { version = "1", features = ["mmap", "rayon"] }
 bytes = "1"
 hex = "0.4"
 kdl = "6"
-parking_lot = "0.12"
+parking_lot = { version = "0.12", features = ["arc_lock"] }
 tempfile = "3"
 thiserror = "2"
 tracing = "0.1"

@@ -155,7 +155,7 @@ mod tests {
 
         // Create database with pre-created directories
         let config =
-            Config { sync_mode: SyncMode::Sync, num_ops_per_wal: 100, pre_create_cas_dirs: true };
+            Config { sync_mode: SyncMode::Sync, num_ops_per_wal: 100, pre_create_cas_dirs: true, ..Default::default() };
 
         {
             let cas = Cas::open(db_path, StringEncoder, config.clone())?;
@@ -218,7 +218,7 @@ mod tests {
 
         // Create database with specific num_ops_per_wal
         let config =
-            Config { sync_mode: SyncMode::Sync, num_ops_per_wal: 1000, pre_create_cas_dirs: false };
+            Config { sync_mode: SyncMode::Sync, num_ops_per_wal: 1000, pre_create_cas_dirs: false, ..Default::default() };
 
         {
             let _cas = Cas::open(db_path, StringEncoder, config)?;
@@ -229,6 +229,7 @@ mod tests {
             sync_mode: SyncMode::Sync,
             num_ops_per_wal: 2000, // Different value
             pre_create_cas_dirs: false,
+            ..Default::default()
         };
 
         let result = Cas::open(db_path, StringEncoder, config2);
@@ -249,7 +250,7 @@ mod tests {
         let db_path = dir.path();
 
         let config =
-            Config { sync_mode: SyncMode::Sync, num_ops_per_wal: 5000, pre_create_cas_dirs: true };
+            Config { sync_mode: SyncMode::Sync, num_ops_per_wal: 5000, pre_create_cas_dirs: true, ..Default::default() };
 
         {
             let _cas = Cas::open(db_path, StringEncoder, config)?;
