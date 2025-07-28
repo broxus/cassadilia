@@ -47,7 +47,7 @@ impl CasManager {
     pub fn new(paths: paths::DbPaths, fs_lock: FsLock, dir_tree_is_pre_created: bool) -> Self {
         Self { paths, fs_lock, dir_tree_is_pre_created }
     }
-    
+
     pub(crate) fn lock_arc(&self) -> parking_lot::ArcMutexGuard<parking_lot::RawMutex, ()> {
         self.fs_lock.lock_arc()
     }

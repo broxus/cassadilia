@@ -29,7 +29,6 @@ use settings::{DbSettings, SettingsError, SettingsPersister};
 #[cfg(test)]
 mod tests;
 
-
 mod index;
 use index::Index;
 
