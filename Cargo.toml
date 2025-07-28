@@ -2,6 +2,15 @@
 name = "cassadilia"
 version = "0.1.0"
 edition = "2024"
+authors = ["0xdeafbeef"]
+description = "A content-addressable storage (CAS) system optimized for large blobs with read-mostly access patterns"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/broxus/cassadilia"
+homepage = "https://github.com/broxus/cassadilia"
+documentation = "https://docs.rs/cassadilia"
+readme = "README.md"
+keywords = ["storage", "content-addressable", "cas", "blob", "database"]
+categories = ["database", "filesystem", "data-structures"]
 
 [dependencies]
 blake3 = { version = "1", features = ["mmap", "rayon"] }
