@@ -142,10 +142,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::test_utils::directory_helpers::{
+    use crate::tests::utils::directory_helpers::{
         analyze_directory_structure, count_directories_recursive, count_leaf_directories,
     };
-    use crate::test_utils::encoders::StringEncoder;
+    use crate::tests::utils::encoders::StringEncoder;
     use crate::{Cas, Config, LibError, SyncMode};
 
     #[test]

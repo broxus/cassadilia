@@ -1,3 +1,5 @@
+pub(crate) mod utils;
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
@@ -5,7 +7,7 @@ use anyhow::Result;
 use tempfile::tempdir;
 
 use crate::index::{CHECKPOINT_META_FILENAME, IndexError};
-use crate::test_utils::encoders::{StringEncoder, VecU8Encoder};
+use crate::tests::utils::encoders::{StringEncoder, VecU8Encoder};
 use crate::{Cas, Config, LibError, LibIoOperation, SyncMode};
 
 fn setup_tracing() {

@@ -340,7 +340,7 @@ mod tests {
 
     use super::*;
     use crate::Config;
-    use crate::test_utils::encoders::StringEncoder;
+    use crate::tests::utils::encoders::StringEncoder;
 
     fn setup_test_index() -> (tempfile::TempDir, Index<String>) {
         let dir = tempdir().unwrap();
