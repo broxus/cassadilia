@@ -89,7 +89,7 @@ where
     /// Returns a list of blob hashes that are no longer referenced.
     pub(crate) fn commit(mut self) -> Result<Vec<BlobHash>, IndexError> {
         let op = WalOp::Put { key: self.key.clone(), hash: self.hash };
-        let result = self.index.apply_wal_op_with_intent(&op, &self.key)?;
+        let result = self.index.apply_put_op(&op, &self.key)?;
         self.committed = true;
         Ok(result)
     }
@@ -117,9 +117,6 @@ where
                     if let Some(replaced_hash) = self.replaced_hash {
                         intents.insert(self.key.clone(), replaced_hash);
                     }
-
-                    drop(intents); // Release lock before acquiring state lock
-
                     // Decrement ref count for our hash
                     let _ = state.decrement_ref(&self.hash); // Ignore errors in drop
 
@@ -177,7 +174,7 @@ where
         Ok(index)
     }
 
-    pub fn apply_wal_op(&self, logical_op: &WalOp<K>) -> Result<Vec<BlobHash>, IndexError> {
+    pub fn apply_wal_op_unsafe(&self, logical_op: &WalOp<K>) -> Result<Vec<BlobHash>, IndexError> {
         let op_data =
             logical_op.to_raw(&self.key_encoder).map_err(IndexError::WalOpToRawEncodeKey)?;
         let op_data = serialize_wal_op_raw(&op_data).map_err(IndexError::ApplyWalOpSerialize)?;
@@ -281,19 +278,34 @@ where
         Ok(IntentGuard { index: self, key, hash, replaced_hash, committed: false })
     }
 
-    pub fn apply_wal_op_with_intent(
+    pub fn apply_put_op(
         &self,
         logical_op: &WalOp<K>,
         key: &K,
     ) -> Result<Vec<BlobHash>, IndexError> {
-        // First apply the WAL operation as usual
-        let mut unreferenced_from_op = self.apply_wal_op(logical_op)?;
-
-        // Remove the intent now that it's committed
+        // Atomically apply WAL operation and remove intent to prevent
+        // other threads from seeing committed state while intent exists
         let mut intents = self.pending_intents.lock();
+
+        let mut unreferenced_from_op = self.apply_wal_op_unsafe(logical_op)?;
+
         intents.remove(key);
 
-        // Filter out any hashes that are still referenced by pending intents
+        // Prevent deletion of blobs still referenced by pending intents
+        unreferenced_from_op
+            .retain(|hash| !intents.values().any(|intent_hash| intent_hash == hash));
+
+        Ok(unreferenced_from_op)
+    }
+
+    pub fn apply_remove_op(&self, logical_op: &WalOp<K>) -> Result<Vec<BlobHash>, IndexError> {
+        // Take intent lock before applying remove to prevent deletion
+        // of blobs that have pending put operations
+        let intents = self.pending_intents.lock();
+
+        let mut unreferenced_from_op = self.apply_wal_op_unsafe(logical_op)?;
+
+        // Filter out blobs that are targets of pending intents
         unreferenced_from_op
             .retain(|hash| !intents.values().any(|intent_hash| intent_hash == hash));
 

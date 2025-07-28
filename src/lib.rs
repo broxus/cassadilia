@@ -364,7 +364,7 @@ where
     pub fn remove(&self, key: &K) -> Result<bool, LibError> {
         if self.index.contains_key(key) {
             let op = WalOp::Remove { keys: vec![key.clone()] };
-            let to_delete = self.index.apply_wal_op(&op).map_err(LibError::Index)?;
+            let to_delete = self.index.apply_remove_op(&op).map_err(LibError::Index)?;
             let _deleted_hashes =
                 self.cas_manager.delete_blobs(&to_delete).map_err(LibError::Cas)?;
             Ok(true)
@@ -391,7 +391,7 @@ where
         tracing::debug!("Removing {} keys in range {:?}", keys_to_remove.len(), range);
 
         let op = WalOp::Remove { keys: keys_to_remove.clone() };
-        let to_delete = self.index.apply_wal_op(&op).map_err(LibError::Index)?;
+        let to_delete = self.index.apply_remove_op(&op).map_err(LibError::Index)?;
         let _deleted_hashes = self.cas_manager.delete_blobs(&to_delete).map_err(LibError::Cas)?;
 
         Ok(keys_to_remove.len())
