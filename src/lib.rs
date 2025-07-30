@@ -37,8 +37,11 @@ use cas_manager::{CasManager, CasManagerError};
 use index::IndexError;
 pub use transaction::Transaction;
 
+use self::io::{FileExt, LockedFile};
+
 #[derive(Debug, Clone)]
 pub enum LibIoOperation {
+    CreateLockFile,
     CreateStagingDir,
     CreateCasDir,
     FileSync,
@@ -59,6 +62,9 @@ pub enum LibError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("Db instance is already in use")]
+    AlreadyOpened,
 
     #[error("CAS operation failed")]
     Cas(CasManagerError),
@@ -187,6 +193,8 @@ where
 }
 
 pub struct CasInner<K> {
+    #[allow(unused)]
+    lockfile: LockedFile,
     pub(crate) paths: paths::DbPaths,
     pub(crate) index: Index<K>,
     datasync_channel: Option<std::sync::mpsc::Sender<File>>,
@@ -230,6 +238,19 @@ where
             path: Some(paths.cas_root_path().to_path_buf()),
             source: e,
         })?;
+
+        let lockfile = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(paths.lockfile_path())
+            .map_err(|e| LibError::Io {
+                operation: LibIoOperation::CreateLockFile,
+                path: Some(paths.lockfile_path().to_path_buf()),
+                source: e,
+            })?
+            .lock()
+            .map_err(|_e| LibError::AlreadyOpened)?;
 
         // Load or create settings
         let settings_persister = SettingsPersister::new(paths.settings_path().to_path_buf());
@@ -283,7 +304,7 @@ where
             }
         };
 
-        Ok(Self { paths, index, datasync_channel, cas_manager })
+        Ok(Self { lockfile, paths, index, datasync_channel, cas_manager })
     }
 
     /// Start a new transaction for the given key.
