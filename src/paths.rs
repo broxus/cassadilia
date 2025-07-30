@@ -6,6 +6,7 @@ use crate::types::BlobHash;
 #[derive(Debug, Clone)]
 pub(crate) struct DbPaths {
     db_root: PathBuf,
+    lockfile_path: PathBuf,
     index_path: PathBuf,
     index_tmp_path: PathBuf,
     checkpoint_meta_path: PathBuf,
@@ -17,6 +18,7 @@ pub(crate) struct DbPaths {
 
 impl DbPaths {
     pub fn new(db_root: PathBuf) -> Self {
+        let lockfile_path = db_root.join("LOCK");
         let index_path = db_root.join("index");
         let index_tmp_path = db_root.join("index.tmp");
         let checkpoint_meta_path = db_root.join(CHECKPOINT_META_FILENAME);
@@ -27,6 +29,7 @@ impl DbPaths {
 
         Self {
             db_root,
+            lockfile_path,
             index_path,
             index_tmp_path,
             checkpoint_meta_path,
@@ -39,6 +42,10 @@ impl DbPaths {
 
     pub fn db_root_path(&self) -> &Path {
         &self.db_root
+    }
+
+    pub fn lockfile_path(&self) -> &Path {
+        &self.lockfile_path
     }
 
     pub fn wal_path_for_segment(&self, segment_id: u64) -> PathBuf {

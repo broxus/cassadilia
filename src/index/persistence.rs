@@ -11,20 +11,6 @@ use crate::serialization::{
 };
 use crate::types::{BlobHash, KeyEncoder, KeyEncoderError};
 
-#[derive(Error, Debug)]
-pub enum PersisterError {
-    #[error("Persister: Failed to read index file")]
-    ReadIndexIo(#[source] std::io::Error),
-    #[error("Persister: Failed to decode index data")]
-    DecodeIndex(#[from] SerializationError),
-    #[error("Persister: Failed to decode key from index")]
-    DecodeKey(#[source] KeyEncoderError),
-    #[error("Persister: Failed to encode key for persistence")]
-    EncodeKey(#[source] KeyEncoderError),
-    #[error("Persister: Failed to atomically write index state")]
-    AtomicWrite(#[from] IoError),
-}
-
 pub(crate) struct IndexStatePersister<'a> {
     paths: &'a DbPaths,
 }
@@ -109,4 +95,18 @@ impl<'a> IndexStatePersister<'a> {
         );
         Ok(())
     }
+}
+
+#[derive(Error, Debug)]
+pub enum PersisterError {
+    #[error("Persister: Failed to read index file")]
+    ReadIndexIo(#[source] std::io::Error),
+    #[error("Persister: Failed to decode index data")]
+    DecodeIndex(#[from] SerializationError),
+    #[error("Persister: Failed to decode key from index")]
+    DecodeKey(#[source] KeyEncoderError),
+    #[error("Persister: Failed to encode key for persistence")]
+    EncodeKey(#[source] KeyEncoderError),
+    #[error("Persister: Failed to atomically write index state")]
+    AtomicWrite(#[from] IoError),
 }
