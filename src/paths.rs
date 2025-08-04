@@ -25,7 +25,7 @@ impl DbPaths {
         let checkpoint_meta_tmp_path = db_root.join(format!("{CHECKPOINT_META_FILENAME}.tmp"));
         let cas_root_path = db_root.join("cas");
         let staging_root_path = db_root.join("staging");
-        let settings_path = db_root.join("db_settings.kdl");
+        let settings_path = db_root.join("db_settings.json");
 
         Self {
             db_root,
