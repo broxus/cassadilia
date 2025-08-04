@@ -1,9 +1,10 @@
-use std::collections::HashSet;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+
+use ahash::HashSet;
 
 use crate::types::BlobHash;
 use crate::{CasInner, LibError, LibIoOperation};
@@ -174,8 +175,9 @@ where
     let fs_lock = cas_inner.cas_manager.lock_arc();
 
     // Get current index state
-    let index_blobs = cas_inner.index.known_blobs();
-    let mut seen_blobs = HashSet::new();
+    let index_blobs =
+        cas_inner.index.read_state().known_blobs().map(|(key, _)| *key).collect::<HashSet<_>>();
+    let mut seen_blobs = HashSet::default();
 
     // Single pass through CAS directory
     let cas_root = cas_inner.paths.cas_root_path();

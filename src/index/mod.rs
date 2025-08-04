@@ -1,8 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::borrow::Borrow;
+use std::collections::BTreeMap;
 use std::fmt::Debug;
+use std::ops::RangeBounds;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ahash::HashMap;
 use parking_lot::{Mutex, RwLock};
 use persistence::{IndexStatePersister, PersisterError};
 use state::{IndexState, IndexStateError};
@@ -166,12 +169,16 @@ where
             key_encoder,
             state,
             wal: Mutex::new(wal_manager),
-            pending_intents: Mutex::new(HashMap::new()),
+            pending_intents: Mutex::new(HashMap::default()),
         };
 
         index.checkpoint(false)?; // Don't seal segment on startup
 
         Ok(index)
+    }
+
+    pub fn read_state(&self) -> IndexReadGuard<'_, K> {
+        IndexReadGuard { inner: self.state.read() }
     }
 
     pub fn apply_wal_op_unsafe(&self, logical_op: &WalOp<K>) -> Result<Vec<BlobHash>, IndexError> {
@@ -225,34 +232,6 @@ where
 
         tracing::info!("Checkpoint completed successfully.");
         Ok(())
-    }
-
-    pub fn get_hash_for_key(&self, key: &K) -> Option<BlobHash> {
-        let state_guard = self.state.read();
-        state_guard.key_to_hash.get(key).copied()
-    }
-
-    pub fn require_hash_for_key(&self, key: &K) -> Result<BlobHash, IndexError> {
-        self.get_hash_for_key(key).ok_or(IndexError::KeyNotFound { key: format!("{key:?}") })
-    }
-
-    pub fn contains_key(&self, key: &K) -> bool {
-        self.get_hash_for_key(key).is_some()
-    }
-
-    pub fn known_keys(&self) -> BTreeSet<K> {
-        let state_guard = self.state.read();
-        state_guard.key_to_hash.keys().cloned().collect()
-    }
-
-    pub fn known_blobs(&self) -> BTreeSet<BlobHash> {
-        let state_guard = self.state.read();
-        state_guard.hash_to_ref_count.keys().copied().collect()
-    }
-
-    pub fn index_snapshot(&self) -> BTreeMap<K, BlobHash> {
-        let state_guard = self.state.read();
-        state_guard.key_to_hash.clone()
     }
 
     pub fn register_intent(&self, key: K, hash: BlobHash) -> Result<IntentGuard<K>, IndexError> {
@@ -341,6 +320,48 @@ impl<K: Debug> Debug for Index<K> {
                 ),
             )
             .finish()
+    }
+}
+
+pub struct IndexReadGuard<'a, K> {
+    inner: parking_lot::RwLockReadGuard<'a, IndexState<K>>,
+}
+
+impl<'a, K> IndexReadGuard<'a, K>
+where
+    K: Debug + Clone + Ord,
+{
+    pub fn get_hash_for_key(&self, key: &K) -> Option<BlobHash> {
+        self.inner.key_to_hash.get(key).copied()
+    }
+
+    pub fn require_hash_for_key(&self, key: &K) -> Result<BlobHash, IndexError> {
+        self.get_hash_for_key(key).ok_or(IndexError::KeyNotFound { key: format!("{key:?}") })
+    }
+
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.inner.key_to_hash.contains_key(key)
+    }
+
+    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, K, BlobHash> {
+        self.inner.key_to_hash.iter()
+    }
+
+    pub fn range<T, R>(&self, range: R) -> std::collections::btree_map::Range<'_, K, BlobHash>
+    where
+        T: ?Sized + Ord,
+        K: Borrow<T> + Ord,
+        R: RangeBounds<T>,
+    {
+        self.inner.key_to_hash.range(range)
+    }
+
+    pub fn keys_snapshot(&self) -> BTreeMap<K, BlobHash> {
+        self.inner.key_to_hash.clone()
+    }
+
+    pub fn known_blobs(&self) -> std::collections::hash_map::Iter<'_, BlobHash, u32> {
+        self.inner.hash_to_ref_count.iter()
     }
 }
 
