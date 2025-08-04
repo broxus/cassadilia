@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::io::atomically_write_file_bytes;
 
 pub const CURRENT_DB_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub(crate) struct DbSettings {
     pub version: u32,
     pub dir_tree_is_pre_created: bool,
@@ -18,17 +19,8 @@ pub enum SettingsError {
     #[error("Failed to read settings file: {0}")]
     ReadFile(#[source] std::io::Error),
 
-    #[error("Failed to write settings file: {0}")]
-    WriteFile(#[source] std::io::Error),
-
-    #[error("Failed to parse KDL: {0}")]
-    ParseKdl(#[from] kdl::KdlError),
-
-    #[error("Missing required field in settings: {0}")]
-    MissingField(&'static str),
-
-    #[error("Invalid field type in settings: {field}")]
-    InvalidFieldType { field: String },
+    #[error("Failed to parse settings: {0}")]
+    ParseFailed(#[from] serde_json::Error),
 
     #[error("Settings validation failed: {0}")]
     ValidationFailed(String),
@@ -49,62 +41,21 @@ impl SettingsPersister {
         Self { settings_path }
     }
 
-    fn read_int<T: TryFrom<i128>>(
-        doc: &kdl::KdlDocument,
-        name: &str,
-    ) -> Result<Option<T>, SettingsError>
-    where
-        T::Error: std::fmt::Debug,
-    {
-        match doc.get(name) {
-            Some(node) => {
-                let value = node
-                    .entries()
-                    .first()
-                    .and_then(|entry| entry.value().as_integer())
-                    .ok_or(SettingsError::InvalidFieldType { field: name.to_string() })?;
-
-                T::try_from(value)
-                    .map(Some)
-                    .map_err(|_e| SettingsError::InvalidFieldType { field: name.to_string() })
-            }
-            None => Ok(None),
-        }
-    }
-
-    fn read_bool(doc: &kdl::KdlDocument, name: &str) -> Result<Option<bool>, SettingsError> {
-        match doc.get(name) {
-            Some(node) => node
-                .entries()
-                .first()
-                .and_then(|entry| entry.value().as_bool())
-                .ok_or(SettingsError::InvalidFieldType { field: name.to_string() })
-                .map(Some),
-            None => Ok(None),
-        }
-    }
-
     pub fn load(&self) -> Result<Option<DbSettings>, SettingsError> {
         match std::fs::read_to_string(&self.settings_path) {
             Ok(content) => {
-                let doc = content.parse::<kdl::KdlDocument>()?;
+                let settings: DbSettings =
+                    serde_json::from_str(&content).map_err(SettingsError::ParseFailed)?;
 
-                let version = Self::read_int::<u32>(&doc, "version")?.unwrap_or(CURRENT_DB_VERSION);
-
-                if version > CURRENT_DB_VERSION {
+                // TODO: Add a proper migration stuff.
+                if settings.version > CURRENT_DB_VERSION {
                     return Err(SettingsError::UnsupportedVersion {
-                        found: version,
+                        found: settings.version,
                         expected: CURRENT_DB_VERSION,
                     });
                 }
 
-                let dir_tree_is_pre_created = Self::read_bool(&doc, "dir_tree_is_pre_created")?
-                    .ok_or(SettingsError::MissingField("dir_tree_is_pre_created"))?;
-
-                let num_ops_per_wal = Self::read_int::<u64>(&doc, "num_ops_per_wal")?
-                    .ok_or(SettingsError::MissingField("num_ops_per_wal"))?;
-
-                Ok(Some(DbSettings { version, dir_tree_is_pre_created, num_ops_per_wal }))
+                Ok(Some(settings))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(SettingsError::ReadFile(e)),
@@ -112,25 +63,13 @@ impl SettingsPersister {
     }
 
     pub fn save(&self, settings: &DbSettings) -> Result<(), SettingsError> {
-        let mut doc = kdl::KdlDocument::new();
-
-        let mut version_node = kdl::KdlNode::new("version");
-        version_node.push(kdl::KdlEntry::new(settings.version as i128));
-        doc.nodes_mut().push(version_node);
-
-        let mut dir_tree_node = kdl::KdlNode::new("dir_tree_is_pre_created");
-        dir_tree_node.push(kdl::KdlEntry::new(settings.dir_tree_is_pre_created));
-        doc.nodes_mut().push(dir_tree_node);
-
-        let mut num_ops_node = kdl::KdlNode::new("num_ops_per_wal");
-        num_ops_node.push(kdl::KdlEntry::new(settings.num_ops_per_wal as i128));
-        doc.nodes_mut().push(num_ops_node);
+        let serialized = serde_json::to_string(settings).unwrap();
 
         // The temp file should be in the same directory as the final file
-        let temp_path = self.settings_path.with_extension("kdl.tmp");
+        let temp_path = self.settings_path.with_extension("json.tmp");
 
         // Write atomically
-        atomically_write_file_bytes(&self.settings_path, &temp_path, doc.to_string().as_bytes())?;
+        atomically_write_file_bytes(&self.settings_path, &temp_path, serialized)?;
 
         Ok(())
     }
@@ -253,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn test_kdl_settings_file() -> Result<()> {
+    fn test_settings_file() -> Result<()> {
         let dir = tempdir()?;
         let db_path = dir.path();
 
@@ -269,7 +208,7 @@ mod tests {
         }
 
         // Check that settings file was created and can be loaded correctly
-        let settings_path = db_path.join("db_settings.kdl");
+        let settings_path = db_path.join("db_settings.json");
         assert!(settings_path.exists());
 
         let persister = SettingsPersister::new(settings_path);
@@ -284,39 +223,13 @@ mod tests {
     }
 
     #[test]
-    fn test_version_backward_compatibility() -> Result<()> {
-        let dir = tempdir()?;
-        let settings_path = dir.path().join("db_settings.kdl");
-
-        // Write an old-style settings file without version
-        let old_content = r#"
-dir_tree_is_pre_created #false
-num_ops_per_wal 1000
-"#;
-        std::fs::write(&settings_path, old_content)?;
-
-        // Load should default version to CURRENT_DB_VERSION
-        let persister = SettingsPersister::new(settings_path.clone());
-        let settings = persister.load()?.unwrap();
-        assert_eq!(settings.version, CURRENT_DB_VERSION);
-        assert!(!settings.dir_tree_is_pre_created);
-        assert_eq!(settings.num_ops_per_wal, 1000);
-
-        Ok(())
-    }
-
-    #[test]
     fn test_future_version_rejected() -> Result<()> {
         let dir = tempdir()?;
-        let settings_path = dir.path().join("db_settings.kdl");
+        let settings_path = dir.path().join("db_settings.json");
 
         // Write a settings file with future version
         let future_content = format!(
-            r#"
-version {}
-dir_tree_is_pre_created #false
-num_ops_per_wal 1000
-"#,
+            r#"{{"version":{},"dir_tree_is_pre_created":false,"num_ops_per_wal":1000}}"#,
             CURRENT_DB_VERSION + 1
         );
         std::fs::write(&settings_path, future_content)?;

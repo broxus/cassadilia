@@ -264,7 +264,7 @@ mod tests {
 
         match deserialized {
             WalOpRaw::Put { key_bytes, hash } => {
-                assert_eq!(key_bytes, vec![]);
+                assert_eq!(key_bytes, Vec::<u8>::new());
                 assert_eq!(hash, make_test_hash(42));
             }
             WalOpRaw::Remove { .. } => panic!("Wrong variant"),

@@ -9,7 +9,7 @@ use thiserror::Error;
 pub(crate) fn atomically_write_file_bytes(
     target_path: &Path,
     temp_path: &Path,
-    bytes: &[u8],
+    bytes: impl AsRef<[u8]>,
 ) -> Result<(), IoError> {
     let mut temp_file =
         OpenOptions::new().write(true).create(true).truncate(true).open(temp_path).map_err(
@@ -21,7 +21,7 @@ pub(crate) fn atomically_write_file_bytes(
             },
         )?;
 
-    temp_file.write_all(bytes).map_err(|e| IoError::AtomicWrite {
+    temp_file.write_all(bytes.as_ref()).map_err(|e| IoError::AtomicWrite {
         step: AtomicWriteStep::WriteTemp,
         target_path: target_path.to_path_buf(),
         temp_path: temp_path.to_path_buf(),
