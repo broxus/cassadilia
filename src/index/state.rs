@@ -1,5 +1,6 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
+use ahash::HashMap;
 use thiserror::Error;
 
 use crate::types::{BlobHash, WalOp};
@@ -23,7 +24,7 @@ where
     K: Clone + Eq + Ord,
 {
     pub fn new() -> Self {
-        IndexState { key_to_hash: BTreeMap::new(), hash_to_ref_count: HashMap::new() }
+        IndexState { key_to_hash: BTreeMap::new(), hash_to_ref_count: HashMap::default() }
     }
 
     pub fn apply_logical_op(&mut self, op: &WalOp<K>) -> Result<Vec<BlobHash>, IndexStateError> {

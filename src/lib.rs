@@ -1,4 +1,3 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::Debug;
 use std::fs::File;
@@ -30,11 +29,11 @@ use settings::{DbSettings, SettingsError, SettingsPersister};
 mod tests;
 
 mod index;
-use index::Index;
+pub use index::IndexReadGuard;
+use index::{Index, IndexError};
 
 mod transaction;
 use cas_manager::{CasManager, CasManagerError};
-use index::IndexError;
 pub use transaction::Transaction;
 
 use self::io::{FileExt, LockedFile};
@@ -307,6 +306,10 @@ where
         Ok(Self { lockfile, paths, index, datasync_channel, cas_manager })
     }
 
+    pub fn read_index_state(&self) -> IndexReadGuard<'_, K> {
+        self.index.read_state()
+    }
+
     /// Start a new transaction for the given key.
     pub fn put(&self, key: K) -> Result<Transaction<K>, LibError> {
         Transaction::new(self, key).map_err(|e| match e {
@@ -327,27 +330,93 @@ where
         })
     }
 
-    pub fn get_hash_for_key(&self, key: &K) -> Option<BlobHash> {
-        self.index.get_hash_for_key(key)
-    }
-
-    pub fn contains_key(&self, key: &K) -> bool {
-        self.index.contains_key(key)
-    }
-
     pub fn get(&self, key: &K) -> Result<Option<bytes::Bytes>, LibError> {
-        self.with_blob_hash(key, "read", false, |blob_hash| self.cas_manager.read_blob(blob_hash))
+        self.with_blob_hash(key, |blob_hash| self.cas_manager.read_blob(blob_hash))
     }
 
-    pub fn size(&self, key: &K) -> Result<Option<u64>, LibError> {
-        self.with_blob_hash(key, "size check", false, |blob_hash| {
-            self.cas_manager.blob_size(blob_hash)
+    pub fn get_size(&self, key: &K) -> Result<Option<u64>, LibError> {
+        self.with_blob_hash(key, |blob_hash| self.cas_manager.blob_size(blob_hash))
+    }
+
+    pub fn get_reader(&self, key: &K) -> Result<Option<BufReader<File>>, LibError> {
+        self.with_blob_hash(key, |blob_hash| self.cas_manager.blob_bufreader(blob_hash))
+    }
+
+    pub fn get_range(
+        &self,
+        key: &K,
+        range_start: u64,
+        range_end: u64,
+    ) -> Result<Option<bytes::Bytes>, LibError> {
+        self.with_blob_hash(key, |blob_hash| {
+            self.cas_manager.read_blob_range(blob_hash, range_start, range_end)
         })
     }
 
-    pub fn raw_bufreader(&self, key: &K) -> Result<BufReader<File>, LibError> {
-        let blob_hash = self.index.require_hash_for_key(key).map_err(LibError::Index)?;
-        self.cas_manager.blob_bufreader(&blob_hash).map_err(LibError::Cas)
+    pub fn remove(&self, key: &K) -> Result<bool, LibError> {
+        if self.index.read_state().contains_key(key) {
+            let op = WalOp::Remove { keys: vec![key.clone()] };
+            let to_delete = self.index.apply_remove_op(&op).map_err(LibError::Index)?;
+            let _deleted_hashes =
+                self.cas_manager.delete_blobs(&to_delete).map_err(LibError::Cas)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn remove_range<R>(&self, range: R) -> Result<usize, LibError>
+    where
+        R: RangeBounds<K> + Debug + Clone,
+    {
+        let keys_to_remove: Vec<K> = {
+            let state = self.index.read_state();
+            state.range(range.clone()).map(|(key, _)| key.clone()).collect()
+        };
+
+        if keys_to_remove.is_empty() {
+            return Ok(0);
+        }
+
+        let keys_to_remove_count = keys_to_remove.len();
+
+        tracing::debug!("Removing {} keys in range {:?}", keys_to_remove_count, range);
+
+        let op = WalOp::Remove { keys: keys_to_remove };
+        let to_delete = self.index.apply_remove_op(&op).map_err(LibError::Index)?;
+        let _deleted_hashes = self.cas_manager.delete_blobs(&to_delete).map_err(LibError::Cas)?;
+
+        Ok(keys_to_remove_count)
+    }
+
+    pub fn checkpoint(&self) -> Result<(), LibError> {
+        self.index.checkpoint(true).map_err(LibError::Index)
+    }
+
+    fn with_blob_hash<T, F>(&self, key: &K, f: F) -> Result<Option<T>, LibError>
+    where
+        F: FnOnce(&BlobHash) -> Result<T, CasManagerError>,
+    {
+        let Some(blob_hash) = self.index.read_state().get_hash_for_key(key) else {
+            return Ok(None);
+        };
+
+        match f(&blob_hash) {
+            Ok(result) => Ok(Some(result)),
+            Err(cas_error) => {
+                if let Some(io_err) =
+                    cas_error.source().and_then(|s| s.downcast_ref::<std::io::Error>())
+                {
+                    if io_err.kind() == std::io::ErrorKind::NotFound {
+                        return Err(LibError::BlobDataMissing {
+                            key: format!("{key:?}"),
+                            hash: blob_hash,
+                        });
+                    }
+                }
+                Err(LibError::Cas(cas_error))
+            }
+        }
     }
 
     fn fdatasync(&self, file: File) -> Result<(), LibError> {
@@ -360,109 +429,6 @@ where
                 file.sync_data().map_err(LibError::CommitFdatasyncIo)?;
                 Ok(())
             }
-        }
-    }
-
-    pub fn known_keys(&self) -> BTreeSet<K> {
-        self.index.known_keys()
-    }
-
-    pub fn index_snapshot(&self) -> BTreeMap<K, BlobHash> {
-        self.index.index_snapshot()
-    }
-
-    pub fn get_range(
-        &self,
-        key: &K,
-        range_start: u64,
-        range_end: u64,
-    ) -> Result<Option<bytes::Bytes>, LibError> {
-        self.with_blob_hash(key, "range read", false, |blob_hash| {
-            self.cas_manager.read_blob_range(blob_hash, range_start, range_end)
-        })
-    }
-
-    pub fn remove(&self, key: &K) -> Result<bool, LibError> {
-        if self.index.contains_key(key) {
-            let op = WalOp::Remove { keys: vec![key.clone()] };
-            let to_delete = self.index.apply_remove_op(&op).map_err(LibError::Index)?;
-            let _deleted_hashes =
-                self.cas_manager.delete_blobs(&to_delete).map_err(LibError::Cas)?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    pub fn known_blobs(&self) -> BTreeSet<BlobHash> {
-        self.index.known_blobs()
-    }
-
-    pub fn remove_range<R>(&self, range: R) -> Result<usize, LibError>
-    where
-        R: RangeBounds<K> + Debug + Clone,
-    {
-        let keys_to_remove: Vec<K> =
-            self.index.known_keys().iter().filter(|key| range.contains(key)).cloned().collect();
-
-        if keys_to_remove.is_empty() {
-            return Ok(0);
-        }
-
-        tracing::debug!("Removing {} keys in range {:?}", keys_to_remove.len(), range);
-
-        let op = WalOp::Remove { keys: keys_to_remove.clone() };
-        let to_delete = self.index.apply_remove_op(&op).map_err(LibError::Index)?;
-        let _deleted_hashes = self.cas_manager.delete_blobs(&to_delete).map_err(LibError::Cas)?;
-
-        Ok(keys_to_remove.len())
-    }
-
-    pub fn checkpoint(&self) -> Result<(), LibError> {
-        self.index.checkpoint(true).map_err(LibError::Index)
-    }
-
-    fn with_blob_hash<T, F>(
-        &self,
-        key: &K,
-        operation_name: &'static str,
-        return_err_on_missing: bool,
-        f: F,
-    ) -> Result<Option<T>, LibError>
-    where
-        F: FnOnce(&BlobHash) -> Result<T, CasManagerError>,
-    {
-        if let Some(blob_hash) = self.index.get_hash_for_key(key) {
-            match f(&blob_hash) {
-                Ok(result) => Ok(Some(result)),
-                Err(cas_error) => {
-                    if let Some(io_err) =
-                        cas_error.source().and_then(|s| s.downcast_ref::<std::io::Error>())
-                    {
-                        if io_err.kind() == std::io::ErrorKind::NotFound {
-                            tracing::error!(
-                                "Index contains key '{:?}' pointing to hash '{}', but CAS file not found during {}!",
-                                key,
-                                blob_hash,
-                                operation_name
-                            );
-                            return if return_err_on_missing {
-                                Err(LibError::BlobDataMissing {
-                                    key: format!("{key:?}"),
-                                    hash: blob_hash,
-                                })
-                            } else {
-                                Ok(None)
-                            };
-                        }
-                    }
-                    Err(LibError::Cas(cas_error))
-                }
-            }
-        } else if return_err_on_missing {
-            Err(LibError::Index(IndexError::KeyNotFound { key: format!("{key:?}") }))
-        } else {
-            Ok(None)
         }
     }
 }

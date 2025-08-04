@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use anyhow::Result;
 use tempfile::tempdir;
 
-use crate::index::{CHECKPOINT_META_FILENAME, IndexError};
+use crate::index::CHECKPOINT_META_FILENAME;
 use crate::tests::utils::encoders::{StringEncoder, VecU8Encoder};
 use crate::{Cas, Config, LibError, LibIoOperation, SyncMode};
 
@@ -290,7 +290,7 @@ fn test_remove_range_persists() -> Result<()> {
         assert!(cas.get(&"key_3".to_string())?.is_some());
         assert!(cas.get(&"key_4".to_string())?.is_some());
 
-        assert_eq!(cas.known_blobs().len(), 2);
+        assert_eq!(cas.index.read_state().known_blobs().count(), 2);
     }
 
     Ok(())
@@ -303,15 +303,15 @@ fn test_api_on_nonexistent_key() -> Result<()> {
     let cas = Cas::open(dir.path(), StringEncoder, Config::default())?;
     let key = "nonexistent_key".to_string();
 
-    let result = cas.raw_bufreader(&key);
+    let result = cas.get_reader(&key).unwrap();
     match result {
-        Err(LibError::Index(IndexError::KeyNotFound { .. })) => {}
+        None => {}
         _ => panic!("Expected KeyNotFound error, got: {result:?}"),
     }
 
     // High-level APIs should gracefully return None.
     assert!(cas.get(&key)?.is_none());
-    assert!(cas.size(&key)?.is_none());
+    assert!(cas.get_size(&key)?.is_none());
     assert!(cas.get_range(&key, 0, 10)?.is_none());
 
     Ok(())
@@ -358,7 +358,7 @@ fn test_orphan_detection_and_cleanup() -> Result<()> {
     tx.finish()?;
 
     // Get the hash for later
-    let _valid_hash = cas.get_hash_for_key(&key1).unwrap();
+    let _valid_hash = cas.index.read_state().get_hash_for_key(&key1).unwrap();
 
     // Now create an orphaned blob by writing directly to CAS
     let orphan_data = b"orphaned data";
@@ -425,7 +425,7 @@ fn test_orphan_detection_with_integrity_check() -> Result<()> {
     tx.write(data1)?;
     tx.finish()?;
 
-    let valid_hash = cas.get_hash_for_key(&key1).unwrap();
+    let valid_hash = cas.index.read_state().get_hash_for_key(&key1).unwrap();
     let valid_path = dir.path().join("cas").join(valid_hash.relative_path());
 
     // Corrupt the blob by modifying its contents
@@ -469,7 +469,7 @@ fn test_orphan_detection_with_missing_blobs() -> Result<()> {
     tx.write(data1)?;
     tx.finish()?;
 
-    let hash1 = cas.get_hash_for_key(&key1).unwrap();
+    let hash1 = cas.index.read_state().get_hash_for_key(&key1).unwrap();
     let blob_path = dir.path().join("cas").join(hash1.relative_path());
 
     // Delete the blob file to simulate missing blob
