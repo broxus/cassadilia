@@ -358,7 +358,7 @@ fn test_orphan_detection_and_cleanup() -> Result<()> {
     tx.finish()?;
 
     // Get the hash for later
-    let _valid_hash = cas.index.read_state().get_hash_for_key(&key1).unwrap();
+    let _valid_hash = cas.index.read_state().get_item(&key1).unwrap();
 
     // Now create an orphaned blob by writing directly to CAS
     let orphan_data = b"orphaned data";
@@ -425,8 +425,8 @@ fn test_orphan_detection_with_integrity_check() -> Result<()> {
     tx.write(data1)?;
     tx.finish()?;
 
-    let valid_hash = cas.index.read_state().get_hash_for_key(&key1).unwrap();
-    let valid_path = dir.path().join("cas").join(valid_hash.relative_path());
+    let item = cas.index.read_state().get_item(&key1).unwrap();
+    let valid_path = dir.path().join("cas").join(item.blob_hash.relative_path());
 
     // Corrupt the blob by modifying its contents
     fs::write(&valid_path, b"corrupted data")?;
@@ -447,7 +447,7 @@ fn test_orphan_detection_with_integrity_check() -> Result<()> {
     match result {
         Err(LibError::IntegrityCheckFailed { corrupted_blobs, .. }) => {
             assert_eq!(corrupted_blobs.len(), 1);
-            assert_eq!(corrupted_blobs[0], valid_hash);
+            assert_eq!(corrupted_blobs[0], item.blob_hash);
         }
         _ => panic!("Expected IntegrityCheckFailed error"),
     }
@@ -469,8 +469,8 @@ fn test_orphan_detection_with_missing_blobs() -> Result<()> {
     tx.write(data1)?;
     tx.finish()?;
 
-    let hash1 = cas.index.read_state().get_hash_for_key(&key1).unwrap();
-    let blob_path = dir.path().join("cas").join(hash1.relative_path());
+    let item1 = cas.index.read_state().get_item(&key1).unwrap();
+    let blob_path = dir.path().join("cas").join(item1.blob_hash.relative_path());
 
     // Delete the blob file to simulate missing blob
     fs::remove_file(&blob_path)?;
@@ -490,7 +490,7 @@ fn test_orphan_detection_with_missing_blobs() -> Result<()> {
     match result {
         Err(LibError::IntegrityCheckFailed { missing_blobs, .. }) => {
             assert_eq!(missing_blobs.len(), 1);
-            assert_eq!(missing_blobs[0], hash1);
+            assert_eq!(missing_blobs[0], item1.blob_hash);
         }
         _ => panic!("Expected IntegrityCheckFailed error"),
     }

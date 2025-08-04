@@ -33,8 +33,6 @@ pub enum CasManagerError {
 
     #[error("Invalid range: start ({start}) > end ({end})")]
     InvalidRangeStartEnd { start: u64, end: u64 },
-    #[error("End is after file size: start ({start}) > end ({end})")]
-    InvalidCalculatedRangeStartEnd { start: u64, end: u64 },
 }
 
 pub struct CasManager {
@@ -60,17 +58,6 @@ impl CasManager {
             source: e,
         })?;
         Ok(bytes::Bytes::from(bytes))
-    }
-
-    pub fn blob_size(&self, blob_hash: &BlobHash) -> Result<u64, CasManagerError> {
-        let cas_path = self.paths.cas_file_path(blob_hash);
-        let metadata =
-            std::fs::metadata(&cas_path).map_err(|e| CasManagerError::FileOperation {
-                operation: CasIoOperation::ReadMetadata,
-                path: cas_path.clone(),
-                source: e,
-            })?;
-        Ok(metadata.len())
     }
 
     pub fn blob_bufreader(&self, blob_hash: &BlobHash) -> Result<BufReader<File>, CasManagerError> {
@@ -103,23 +90,7 @@ impl CasManager {
             source: e,
         })?;
 
-        let len = file
-            .metadata()
-            .map_err(|e| CasManagerError::FileOperation {
-                operation: CasIoOperation::ReadMetadata,
-                path: cas_path.clone(),
-                source: e,
-            })?
-            .len();
-
-        let start = std::cmp::min(range_start, len);
-        let end = std::cmp::min(range_end, len);
-
-        if start > end {
-            return Err(CasManagerError::InvalidCalculatedRangeStartEnd { start, end });
-        }
-
-        let read_len = end - start;
+        let read_len = range_end - range_start;
         if read_len == 0 {
             return Ok(bytes::Bytes::new());
         }
@@ -128,7 +99,7 @@ impl CasManager {
         let mut buff = Vec::with_capacity(read_len as usize);
 
         let mut total_bytes_read = 0;
-        let mut current_offset = start;
+        let mut current_offset = range_start;
 
         // Read in a loop until we've read all requested bytes or hit EOF
         while total_bytes_read < read_len as usize {

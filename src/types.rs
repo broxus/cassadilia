@@ -158,13 +158,13 @@ impl Default for Config {
 
 #[derive(Debug, Clone)]
 pub enum WalOpRaw {
-    Put { key_bytes: Vec<u8>, hash: BlobHash },
+    Put { key_bytes: Vec<u8>, hash: BlobHash, size: u64 },
     Remove { keys_bytes: Vec<Vec<u8>> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum WalOp<K> {
-    Put { key: K, hash: BlobHash },
+    Put { key: K, hash: BlobHash, size: u64 },
     Remove { keys: Vec<K> },
 }
 
@@ -177,11 +177,11 @@ impl<K> WalOp<K> {
         K: 'static,
     {
         match raw_op {
-            WalOpRaw::Put { key_bytes, hash } => {
+            WalOpRaw::Put { key_bytes, hash, size } => {
                 let key = key_encoder
                     .decode(&key_bytes)
                     .map_err(|e| TypesError::DecodeKeyPutFailed { source: e })?;
-                Ok(WalOp::Put { key, hash })
+                Ok(WalOp::Put { key, hash, size })
             }
             WalOpRaw::Remove { keys_bytes } => {
                 let mut keys = Vec::new();
@@ -201,9 +201,9 @@ impl<K> WalOp<K> {
         K: 'static,
     {
         match self {
-            WalOp::Put { key, hash } => {
+            WalOp::Put { key, hash, size } => {
                 let key_bytes = key_encoder.encode(key)?;
-                Ok(WalOpRaw::Put { key_bytes, hash: *hash })
+                Ok(WalOpRaw::Put { key_bytes, hash: *hash, size: *size })
             }
             WalOp::Remove { keys } => {
                 let mut keys_bytes = Vec::new();

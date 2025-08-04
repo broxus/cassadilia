@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use thiserror::Error;
 
+use crate::index::IndexStateItem;
 use crate::types::{BlobHash, HASH_SIZE, WalOpRaw};
 
 #[derive(Error, Debug)]
@@ -23,10 +24,10 @@ pub enum SerializationError {
     InvalidVariantTag { tag: u8, enum_name: &'static str, parsing_context: &'static str },
 }
 
-/// serialize `BTreeMap`<Vec<u8>, `BlobHash`> using hand-rolled format
+/// serialize `BTreeMap`<Vec<u8>, `IndexStateItem`> using hand-rolled format
 /// format: [u32 `num_entries`][[u32 `key_len`][key_bytes][`32_bytes_hash`]]...
-pub(crate) fn serialize_btreemap_bytes_to_hash(
-    map: &BTreeMap<Vec<u8>, BlobHash>,
+pub(crate) fn serialize_index_state(
+    map: &BTreeMap<Vec<u8>, IndexStateItem>,
 ) -> Result<Vec<u8>, SerializationError> {
     let mut result = Vec::new();
 
@@ -35,7 +36,7 @@ pub(crate) fn serialize_btreemap_bytes_to_hash(
     result.extend_from_slice(&num_entries.to_le_bytes());
 
     // write each entry
-    for (key, hash) in map {
+    for (key, item) in map {
         // write key length
         let key_len = key.len() as u32;
         result.extend_from_slice(&key_len.to_le_bytes());
@@ -44,16 +45,19 @@ pub(crate) fn serialize_btreemap_bytes_to_hash(
         result.extend_from_slice(key);
 
         // write hash (always 32 bytes)
-        result.extend_from_slice(hash.as_bytes());
+        result.extend_from_slice(item.blob_hash.as_bytes());
+
+        // write data size (8 bytes, LE)
+        result.extend_from_slice(&item.blob_size.to_le_bytes());
     }
 
     Ok(result)
 }
 
-/// deserialize `BTreeMap`<Vec<u8>, `BlobHash`> using hand-rolled format
-pub(crate) fn deserialize_btreemap_bytes_to_hash(
+/// deserialize `BTreeMap`<Vec<u8>, `IndexStateItem`> using hand-rolled format
+pub(crate) fn deserialize_index_state(
     bytes: &[u8],
-) -> Result<BTreeMap<Vec<u8>, BlobHash>, SerializationError> {
+) -> Result<BTreeMap<Vec<u8>, IndexStateItem>, SerializationError> {
     let mut bytes = bytes;
 
     // read number of entries
@@ -70,7 +74,10 @@ pub(crate) fn deserialize_btreemap_bytes_to_hash(
         let hash = read_fixed_bytes::<HASH_SIZE>(&mut bytes, "BTreeMap hash")?;
         let hash = BlobHash::from_bytes(hash);
 
-        map.insert(key, hash);
+        // read size
+        let size = read_u64(&mut bytes, "BTreeMap size")?;
+
+        map.insert(key, IndexStateItem { blob_hash: hash, blob_size: size });
     }
 
     Ok(map)
@@ -84,7 +91,7 @@ pub(crate) fn serialize_wal_op_raw(op: &WalOpRaw) -> Result<Vec<u8>, Serializati
     let mut result = Vec::new();
 
     match op {
-        WalOpRaw::Put { key_bytes, hash } => {
+        WalOpRaw::Put { key_bytes, hash, size } => {
             // variant tag
             result.push(0);
 
@@ -95,6 +102,9 @@ pub(crate) fn serialize_wal_op_raw(op: &WalOpRaw) -> Result<Vec<u8>, Serializati
 
             // hash
             result.extend_from_slice(hash.as_bytes());
+
+            // size
+            result.extend_from_slice(&size.to_le_bytes());
         }
         WalOpRaw::Remove { keys_bytes } => {
             // variant tag
@@ -126,8 +136,9 @@ pub(crate) fn deserialize_wal_op_raw(bytes: &[u8]) -> Result<WalOpRaw, Serializa
             // Put variant
             let key_bytes = read_bytes_with_len(&mut bytes, "WalOpRaw Put key")?;
             let hash = read_fixed_bytes::<HASH_SIZE>(&mut bytes, "WalOpRaw Put hash")?;
+            let size = read_u64(&mut bytes, "WalOpRaw Put size")?;
             let hash = BlobHash::from_bytes(hash);
-            Ok(WalOpRaw::Put { key_bytes, hash })
+            Ok(WalOpRaw::Put { key_bytes, hash, size })
         }
         1 => {
             // Remove variant
@@ -177,6 +188,21 @@ fn read_u32(bytes: &mut &[u8], parsing_context: &'static str) -> Result<u32, Ser
 }
 
 #[inline]
+fn read_u64(bytes: &mut &[u8], parsing_context: &'static str) -> Result<u64, SerializationError> {
+    if bytes.len() < 8 {
+        return Err(SerializationError::InsufficientData {
+            entity: "u64",
+            expected: 8,
+            found: bytes.len(),
+            parsing_context,
+        });
+    }
+    let value = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+    *bytes = &bytes[8..];
+    Ok(value)
+}
+
+#[inline]
 fn read_fixed_bytes<const N: usize>(
     bytes: &mut &[u8],
     parsing_context: &'static str,
@@ -220,52 +246,54 @@ mod tests {
     use super::*;
     use crate::types::{BlobHash, HASH_SIZE, WalOpRaw};
 
-    fn make_test_hash(byte: u8) -> BlobHash {
+    fn make_test_item(byte: u8) -> IndexStateItem {
         let mut bytes = [0u8; HASH_SIZE];
         bytes[0] = byte;
-        BlobHash::from_bytes(bytes)
+        IndexStateItem { blob_hash: BlobHash::from_bytes(bytes), blob_size: 1 }
     }
 
     #[test]
     fn test_btreemap_serialization_empty() {
-        let map: BTreeMap<Vec<u8>, BlobHash> = BTreeMap::new();
-        let serialized = serialize_btreemap_bytes_to_hash(&map).unwrap();
-        let deserialized = deserialize_btreemap_bytes_to_hash(&serialized).unwrap();
+        let map: BTreeMap<Vec<u8>, IndexStateItem> = BTreeMap::new();
+        let serialized = serialize_index_state(&map).unwrap();
+        let deserialized = deserialize_index_state(&serialized).unwrap();
         assert_eq!(map, deserialized);
     }
 
     #[test]
     fn test_btreemap_serialization_single_empty_key() {
         let mut map = BTreeMap::new();
-        map.insert(vec![], make_test_hash(1));
-        let serialized = serialize_btreemap_bytes_to_hash(&map).unwrap();
-        let deserialized = deserialize_btreemap_bytes_to_hash(&serialized).unwrap();
+        map.insert(vec![], make_test_item(1));
+        let serialized = serialize_index_state(&map).unwrap();
+        let deserialized = deserialize_index_state(&serialized).unwrap();
         assert_eq!(map, deserialized);
     }
 
     #[test]
     fn test_btreemap_serialization_multiple_keys() {
         let mut map = BTreeMap::new();
-        map.insert(vec![], make_test_hash(1)); // empty key
-        map.insert(vec![1, 2, 3], make_test_hash(2)); // small key
-        map.insert(vec![255; 1000], make_test_hash(3)); // large key
-        map.insert(vec![0], make_test_hash(4)); // single byte key
+        map.insert(vec![], make_test_item(1)); // empty key
+        map.insert(vec![1, 2, 3], make_test_item(2)); // small key
+        map.insert(vec![255; 1000], make_test_item(3)); // large key
+        map.insert(vec![0], make_test_item(4)); // single byte key
 
-        let serialized = serialize_btreemap_bytes_to_hash(&map).unwrap();
-        let deserialized = deserialize_btreemap_bytes_to_hash(&serialized).unwrap();
+        let serialized = serialize_index_state(&map).unwrap();
+        let deserialized = deserialize_index_state(&serialized).unwrap();
         assert_eq!(map, deserialized);
     }
 
     #[test]
     fn test_wal_op_put_empty_key() {
-        let op = WalOpRaw::Put { key_bytes: vec![], hash: make_test_hash(42) };
+        let IndexStateItem { blob_hash, blob_size } = make_test_item(42);
+        let op = WalOpRaw::Put { key_bytes: vec![], hash: blob_hash, size: blob_size };
         let serialized = serialize_wal_op_raw(&op).unwrap();
         let deserialized = deserialize_wal_op_raw(&serialized).unwrap();
 
         match deserialized {
-            WalOpRaw::Put { key_bytes, hash } => {
+            WalOpRaw::Put { key_bytes, hash, size } => {
                 assert_eq!(key_bytes, Vec::<u8>::new());
-                assert_eq!(hash, make_test_hash(42));
+                assert_eq!(hash, blob_hash);
+                assert_eq!(size, blob_size);
             }
             WalOpRaw::Remove { .. } => panic!("Wrong variant"),
         }
@@ -274,14 +302,16 @@ mod tests {
     #[test]
     fn test_wal_op_put_large_key() {
         let large_key = vec![0xAB; 10000];
-        let op = WalOpRaw::Put { key_bytes: large_key.clone(), hash: make_test_hash(99) };
+        let IndexStateItem { blob_hash, blob_size } = make_test_item(99);
+        let op = WalOpRaw::Put { key_bytes: large_key.clone(), hash: blob_hash, size: blob_size };
         let serialized = serialize_wal_op_raw(&op).unwrap();
         let deserialized = deserialize_wal_op_raw(&serialized).unwrap();
 
         match deserialized {
-            WalOpRaw::Put { key_bytes, hash } => {
+            WalOpRaw::Put { key_bytes, hash, size } => {
                 assert_eq!(key_bytes, large_key);
-                assert_eq!(hash, make_test_hash(99));
+                assert_eq!(hash, blob_hash);
+                assert_eq!(size, blob_size);
             }
             WalOpRaw::Remove { .. } => panic!("Wrong variant"),
         }
@@ -347,7 +377,7 @@ mod tests {
     fn test_btreemap_invalid_data() {
         // test with invalid data that's too short
         let invalid_data = vec![1, 2, 3]; // not enough bytes for even a header
-        let result = deserialize_btreemap_bytes_to_hash(&invalid_data);
+        let result = deserialize_index_state(&invalid_data);
         assert!(result.is_err());
 
         // test with valid header but invalid entry
@@ -355,7 +385,7 @@ mod tests {
         invalid_data.extend_from_slice(&1u32.to_le_bytes()); // 1 entry
         invalid_data.extend_from_slice(&4u32.to_le_bytes()); // key len = 4
         invalid_data.extend_from_slice(b"hi"); // but only 2 bytes provided
-        let result = deserialize_btreemap_bytes_to_hash(&invalid_data);
+        let result = deserialize_index_state(&invalid_data);
         assert!(result.is_err());
     }
 

@@ -7,6 +7,7 @@ use tempfile::NamedTempFile;
 use thiserror::Error;
 
 use crate::CasInner;
+use crate::index::IntentMeta;
 
 #[derive(Debug)]
 pub enum StagingFileOp {
@@ -46,6 +47,7 @@ where
     pub(crate) cas_inner: &'a CasInner<K>,
     pub(crate) writer: BufWriter<File>,
     pub(crate) hasher: blake3::Hasher,
+    pub(crate) size: u64,
     pub(crate) key: K,
 }
 
@@ -80,6 +82,7 @@ where
             temp_file,
             cas_inner,
             hasher: blake3::Hasher::new(),
+            size: 0,
             key,
         })
     }
@@ -87,6 +90,7 @@ where
     /// Append `data` to the transaction.
     /// Most common usage is to incrementally compress and write chunks.
     pub fn write(&mut self, data: &[u8]) -> Result<(), TransactionError> {
+        self.size += data.len() as u64;
         self.hasher.update(data);
         self.writer.write_all(data).map_err(|e| TransactionError::StagingFileIo {
             operation: StagingFileOp::Write,
@@ -118,7 +122,7 @@ where
         let intent_guard = self
             .cas_inner
             .index
-            .register_intent(self.key.clone(), blob_hash)
+            .register_intent(self.key.clone(), IntentMeta { blob_hash, blob_size: self.size })
             .map_err(crate::LibError::Index)?;
 
         let _cas_path = self
