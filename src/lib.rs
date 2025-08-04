@@ -29,8 +29,8 @@ use settings::{DbSettings, SettingsError, SettingsPersister};
 mod tests;
 
 mod index;
-pub use index::IndexReadGuard;
 use index::{Index, IndexError};
+pub use index::{IndexReadGuard, IndexStateItem};
 
 mod transaction;
 use cas_manager::{CasManager, CasManagerError};
@@ -331,25 +331,30 @@ where
     }
 
     pub fn get(&self, key: &K) -> Result<Option<bytes::Bytes>, LibError> {
-        self.with_blob_hash(key, |blob_hash| self.cas_manager.read_blob(blob_hash))
+        self.with_blob_item(key, |item| self.cas_manager.read_blob(&item.blob_hash))
     }
 
     pub fn get_size(&self, key: &K) -> Result<Option<u64>, LibError> {
-        self.with_blob_hash(key, |blob_hash| self.cas_manager.blob_size(blob_hash))
+        self.with_blob_item(key, |item| Ok(item.blob_size))
     }
 
     pub fn get_reader(&self, key: &K) -> Result<Option<BufReader<File>>, LibError> {
-        self.with_blob_hash(key, |blob_hash| self.cas_manager.blob_bufreader(blob_hash))
+        self.with_blob_item(key, |item| self.cas_manager.blob_bufreader(&item.blob_hash))
     }
 
     pub fn get_range(
         &self,
         key: &K,
         range_start: u64,
-        range_end: u64,
+        mut range_end: u64,
     ) -> Result<Option<bytes::Bytes>, LibError> {
-        self.with_blob_hash(key, |blob_hash| {
-            self.cas_manager.read_blob_range(blob_hash, range_start, range_end)
+        self.with_blob_item(key, |item| {
+            if range_start >= item.blob_size {
+                return Ok(bytes::Bytes::new());
+            }
+            range_end = std::cmp::min(range_end, item.blob_size);
+
+            self.cas_manager.read_blob_range(&item.blob_hash, range_start, range_end)
         })
     }
 
@@ -393,15 +398,15 @@ where
         self.index.checkpoint(true).map_err(LibError::Index)
     }
 
-    fn with_blob_hash<T, F>(&self, key: &K, f: F) -> Result<Option<T>, LibError>
+    fn with_blob_item<T, F>(&self, key: &K, f: F) -> Result<Option<T>, LibError>
     where
-        F: FnOnce(&BlobHash) -> Result<T, CasManagerError>,
+        F: FnOnce(&IndexStateItem) -> Result<T, CasManagerError>,
     {
-        let Some(blob_hash) = self.index.read_state().get_hash_for_key(key) else {
+        let Some(item) = self.index.read_state().get_item(key) else {
             return Ok(None);
         };
 
-        match f(&blob_hash) {
+        match f(&item) {
             Ok(result) => Ok(Some(result)),
             Err(cas_error) => {
                 if let Some(io_err) =
@@ -410,7 +415,7 @@ where
                     if io_err.kind() == std::io::ErrorKind::NotFound {
                         return Err(LibError::BlobDataMissing {
                             key: format!("{key:?}"),
-                            hash: blob_hash,
+                            hash: item.blob_hash,
                         });
                     }
                 }

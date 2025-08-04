@@ -6,10 +6,8 @@ use thiserror::Error;
 use super::state::IndexState;
 use crate::io::{IoError, atomically_write_file_bytes};
 use crate::paths::DbPaths;
-use crate::serialization::{
-    SerializationError, deserialize_btreemap_bytes_to_hash, serialize_btreemap_bytes_to_hash,
-};
-use crate::types::{BlobHash, KeyEncoder, KeyEncoderError};
+use crate::serialization::{SerializationError, deserialize_index_state, serialize_index_state};
+use crate::types::{KeyEncoder, KeyEncoderError};
 
 pub(crate) struct IndexStatePersister<'a> {
     paths: &'a DbPaths,
@@ -36,16 +34,15 @@ impl<'a> IndexStatePersister<'a> {
                     );
                     return Ok(state);
                 }
-                let loaded_key_bytes_to_hash: BTreeMap<Vec<u8>, BlobHash> =
-                    deserialize_btreemap_bytes_to_hash(&data)?;
+                let loaded_key_bytes_to_hash = deserialize_index_state(&data)?;
 
                 state.key_to_hash.clear();
                 state.hash_to_ref_count.clear();
 
-                for (key_bytes, hash) in loaded_key_bytes_to_hash {
+                for (key_bytes, item) in loaded_key_bytes_to_hash {
                     let key = key_encoder.decode(&key_bytes).map_err(PersisterError::DecodeKey)?;
-                    state.key_to_hash.insert(key, hash);
-                    state.increment_ref(&hash);
+                    state.key_to_hash.insert(key, item);
+                    state.increment_ref(&item.blob_hash);
                 }
                 tracing::info!(
                     "Loaded {} entries from index '{}' and populated ref counts.",
@@ -84,7 +81,7 @@ impl<'a> IndexStatePersister<'a> {
             key_bytes_to_hash.insert(key_bytes, *hash);
         }
 
-        let data_bytes = serialize_btreemap_bytes_to_hash(&key_bytes_to_hash)?;
+        let data_bytes = serialize_index_state(&key_bytes_to_hash)?;
 
         atomically_write_file_bytes(index_path, index_tmp_path, &data_bytes)?;
 

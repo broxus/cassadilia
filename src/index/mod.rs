@@ -11,6 +11,7 @@ use persistence::{IndexStatePersister, PersisterError};
 use state::{IndexState, IndexStateError};
 use thiserror::Error;
 
+pub use self::state::IndexStateItem;
 use crate::KeyEncoder;
 use crate::paths::DbPaths;
 use crate::serialization::serialize_wal_op_raw;
@@ -80,8 +81,15 @@ where
     index: &'a Index<K>,
     key: K,
     hash: BlobHash,
+    size: u64,
     replaced_hash: Option<BlobHash>,
     committed: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct IntentMeta {
+    pub blob_hash: BlobHash,
+    pub blob_size: u64,
 }
 
 impl<K> IntentGuard<'_, K>
@@ -91,7 +99,7 @@ where
     /// Commit the intent by applying the WAL operation and removing the intent.
     /// Returns a list of blob hashes that are no longer referenced.
     pub(crate) fn commit(mut self) -> Result<Vec<BlobHash>, IndexError> {
-        let op = WalOp::Put { key: self.key.clone(), hash: self.hash };
+        let op = WalOp::Put { key: self.key.clone(), hash: self.hash, size: self.size };
         let result = self.index.apply_put_op(&op, &self.key)?;
         self.committed = true;
         Ok(result)
@@ -234,7 +242,7 @@ where
         Ok(())
     }
 
-    pub fn register_intent(&self, key: K, hash: BlobHash) -> Result<IntentGuard<K>, IndexError> {
+    pub fn register_intent(&self, key: K, meta: IntentMeta) -> Result<IntentGuard<K>, IndexError> {
         let mut intents = self.pending_intents.lock();
         let mut state = self.state.write();
 
@@ -249,12 +257,19 @@ where
         };
 
         // Increment ref count for the new hash
-        state.increment_ref(&hash);
+        state.increment_ref(&meta.blob_hash);
 
         // Insert the new intent
-        intents.insert(key.clone(), hash);
+        intents.insert(key.clone(), meta.blob_hash);
 
-        Ok(IntentGuard { index: self, key, hash, replaced_hash, committed: false })
+        Ok(IntentGuard {
+            index: self,
+            key,
+            hash: meta.blob_hash,
+            size: meta.blob_size,
+            replaced_hash,
+            committed: false,
+        })
     }
 
     pub fn apply_put_op(
@@ -331,23 +346,23 @@ impl<'a, K> IndexReadGuard<'a, K>
 where
     K: Debug + Clone + Ord,
 {
-    pub fn get_hash_for_key(&self, key: &K) -> Option<BlobHash> {
+    pub fn get_item(&self, key: &K) -> Option<IndexStateItem> {
         self.inner.key_to_hash.get(key).copied()
     }
 
-    pub fn require_hash_for_key(&self, key: &K) -> Result<BlobHash, IndexError> {
-        self.get_hash_for_key(key).ok_or(IndexError::KeyNotFound { key: format!("{key:?}") })
+    pub fn require_item(&self, key: &K) -> Result<IndexStateItem, IndexError> {
+        self.get_item(key).ok_or(IndexError::KeyNotFound { key: format!("{key:?}") })
     }
 
     pub fn contains_key(&self, key: &K) -> bool {
         self.inner.key_to_hash.contains_key(key)
     }
 
-    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, K, BlobHash> {
+    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, K, IndexStateItem> {
         self.inner.key_to_hash.iter()
     }
 
-    pub fn range<T, R>(&self, range: R) -> std::collections::btree_map::Range<'_, K, BlobHash>
+    pub fn range<T, R>(&self, range: R) -> std::collections::btree_map::Range<'_, K, IndexStateItem>
     where
         T: ?Sized + Ord,
         K: Borrow<T> + Ord,
@@ -356,7 +371,7 @@ where
         self.inner.key_to_hash.range(range)
     }
 
-    pub fn keys_snapshot(&self) -> BTreeMap<K, BlobHash> {
+    pub fn keys_snapshot(&self) -> BTreeMap<K, IndexStateItem> {
         self.inner.key_to_hash.clone()
     }
 
@@ -396,7 +411,9 @@ mod tests {
 
         // Register intent and verify state
         {
-            let _guard = index.register_intent(key.clone(), hash).unwrap();
+            let _guard = index
+                .register_intent(key.clone(), IntentMeta { blob_hash: hash, blob_size: 1 })
+                .unwrap();
             assert_eq!(index.pending_intents.lock().len(), 1);
             assert_eq!(index.pending_intents.lock().get(&key), Some(&hash));
             assert_eq!(index.state.read().hash_to_ref_count.get(&hash), Some(&1));
@@ -417,14 +434,18 @@ mod tests {
         let hash2 = BlobHash::from_bytes([2; 32]);
 
         // First intent
-        let _guard1 = index.register_intent(key.clone(), hash1).unwrap();
+        let _guard1 = index
+            .register_intent(key.clone(), IntentMeta { blob_hash: hash1, blob_size: 1 })
+            .unwrap();
         assert_eq!(index.pending_intents.lock().len(), 1);
         assert_eq!(index.pending_intents.lock().get(&key), Some(&hash1));
         assert_eq!(index.state.read().hash_to_ref_count.get(&hash1), Some(&1));
 
         // Second intent on same key - should replace first
         {
-            let _guard2 = index.register_intent(key.clone(), hash2).unwrap();
+            let _guard2 = index
+                .register_intent(key.clone(), IntentMeta { blob_hash: hash2, blob_size: 1 })
+                .unwrap();
             assert_eq!(index.pending_intents.lock().len(), 1);
             assert_eq!(index.pending_intents.lock().get(&key), Some(&hash2));
             // hash1 ref count decremented, hash2 incremented
@@ -448,14 +469,16 @@ mod tests {
         let key2 = "key2".to_string();
         let hash = BlobHash::from_bytes([1; 32]); // Same hash for both keys
 
+        let meta = IntentMeta { blob_hash: hash, blob_size: 1 };
+
         // Register first intent
-        let _guard1 = index.register_intent(key1.clone(), hash).unwrap();
+        let _guard1 = index.register_intent(key1.clone(), meta).unwrap();
         assert_eq!(index.pending_intents.lock().len(), 1);
         assert_eq!(index.state.read().hash_to_ref_count.get(&hash), Some(&1));
 
         // Register second intent with same hash
         {
-            let _guard2 = index.register_intent(key2.clone(), hash).unwrap();
+            let _guard2 = index.register_intent(key2.clone(), meta).unwrap();
             assert_eq!(index.pending_intents.lock().len(), 2);
             assert_eq!(index.state.read().hash_to_ref_count.get(&hash), Some(&2));
         }
@@ -475,7 +498,9 @@ mod tests {
         let hash = BlobHash::from_bytes([1; 32]);
 
         // Register intent
-        let guard = index.register_intent(key.clone(), hash).unwrap();
+        let guard = index
+            .register_intent(key.clone(), IntentMeta { blob_hash: hash, blob_size: 1 })
+            .unwrap();
         assert_eq!(index.pending_intents.lock().len(), 1);
         assert_eq!(index.state.read().hash_to_ref_count.get(&hash), Some(&1));
 

@@ -25,6 +25,7 @@ fn append_ops(wal_manager: &mut WalManager, count: u64) {
         let op_raw = WalOpRaw::Put {
             key_bytes: i.to_le_bytes().to_vec(),
             hash: BlobHash::from_bytes([0; 32]),
+            size: 1,
         };
         let op_data = serialize_wal_op_raw(&op_raw).unwrap();
         wal_manager.append_op(&op_data).unwrap();
@@ -116,8 +117,11 @@ fn wal_manager_drop_is_safe_with_active_writer() {
 #[test]
 fn replay_fails_on_key_decode_error() {
     let (mut wal_manager, _dir) = setup_wal_manager(10);
-    let op_raw =
-        WalOpRaw::Put { key_bytes: vec![1], hash: crate::types::BlobHash::from_bytes([0; 32]) };
+    let op_raw = WalOpRaw::Put {
+        key_bytes: vec![1],
+        hash: crate::types::BlobHash::from_bytes([0; 32]),
+        size: 1,
+    };
     let op_data = serialize_wal_op_raw(&op_raw).unwrap();
     wal_manager.append_op(&op_data).unwrap();
 
