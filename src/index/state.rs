@@ -66,7 +66,7 @@ where
     }
 
     pub(crate) fn increment_ref(&mut self, hash: &BlobHash) {
-        *self.hash_to_ref_count.entry(*hash).or_insert(0) += 1;
+        *self.hash_to_ref_count.entry(*hash).or_default() += 1;
     }
 
     pub(crate) fn decrement_ref(

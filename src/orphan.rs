@@ -4,12 +4,30 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use ahash::HashSet;
+use ahash::{HashMap, HashSet};
 
 use crate::types::BlobHash;
 use crate::{CasInner, LibError, LibIoOperation};
 
-fn verify_blob_integrity(path: &Path, expected_hash: &BlobHash) -> Result<bool, LibError> {
+#[derive(Debug)]
+struct ExpectedMeta {
+    blob_size: u64,
+}
+
+fn verify_blob_integrity(
+    path: &Path,
+    expected_hash: &BlobHash,
+    expected_meta: &ExpectedMeta,
+) -> Result<bool, LibError> {
+    let meta = std::fs::metadata(path).map_err(|e| LibError::Io {
+        operation: LibIoOperation::ReadContent,
+        path: Some(path.to_path_buf()),
+        source: e,
+    })?;
+    if meta.len() != expected_meta.blob_size {
+        return Ok(false);
+    }
+
     let mut hasher = blake3::Hasher::new();
 
     hasher.update_mmap_rayon(path).map_err(|e| LibError::Io {
@@ -175,8 +193,15 @@ where
     let fs_lock = cas_inner.cas_manager.lock_arc();
 
     // Get current index state
-    let index_blobs =
-        cas_inner.index.read_state().known_blobs().map(|(key, _)| *key).collect::<HashSet<_>>();
+    let index_blobs = {
+        let state = cas_inner.index.read_state();
+        let mut expected_meta =
+            HashMap::with_capacity_and_hasher(state.known_blobs().len(), Default::default());
+        for (_, item) in state.iter() {
+            expected_meta.insert(item.blob_hash, ExpectedMeta { blob_size: item.blob_size });
+        }
+        expected_meta
+    };
     let mut seen_blobs = HashSet::default();
 
     // Single pass through CAS directory
@@ -235,21 +260,23 @@ where
                     Some(hash) => {
                         seen_blobs.insert(hash);
 
-                        if !index_blobs.contains(&hash) {
+                        match index_blobs.get(&hash) {
                             // Orphaned blob
-                            orphaned_blobs.push(hash);
-                        } else if verify_integrity {
+                            None => orphaned_blobs.push(hash),
                             // Optional integrity check
-                            match verify_blob_integrity(&blob_path, &hash) {
-                                Ok(true) => {} // Valid
-                                Ok(false) => {
-                                    tracing::error!(hash = %hash, "Corrupted blob detected");
-                                    corrupted_blobs.push(hash);
-                                }
-                                Err(e) => {
-                                    tracing::error!(hash = %hash, error = %e, "Failed to verify blob");
+                            Some(expected_meta) if verify_integrity => {
+                                match verify_blob_integrity(&blob_path, &hash, expected_meta) {
+                                    Ok(true) => {} // Valid
+                                    Ok(false) => {
+                                        tracing::error!(%hash, ?expected_meta, "Corrupted blob detected");
+                                        corrupted_blobs.push(hash);
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(hash = %hash, error = %e, "Failed to verify blob");
+                                    }
                                 }
                             }
+                            Some(_) => {}
                         }
                     }
                     None => {
@@ -262,7 +289,7 @@ where
     }
 
     // Find missing blobs (in index but not in filesystem)
-    for hash in index_blobs {
+    for (hash, _) in index_blobs {
         if !seen_blobs.contains(&hash) {
             tracing::error!(hash = %hash, "Missing blob in filesystem");
             missing_blobs.push(hash);
