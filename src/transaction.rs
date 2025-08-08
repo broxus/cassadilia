@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
-use crate::CasInner;
 use crate::index::IntentMeta;
+use crate::{CasInner, KeyBytes};
 
 #[derive(Debug)]
 pub enum StagingFileOp {
@@ -53,7 +53,7 @@ where
 
 impl<'a, K> Transaction<'a, K>
 where
-    K: Clone + Eq + Ord + std::hash::Hash + Debug + Send + Sync + 'static,
+    K: KeyBytes + Clone + Eq + Ord + std::hash::Hash + Debug + Send + Sync + 'static,
 {
     pub(crate) fn new(cas_inner: &'a CasInner<K>, key: K) -> Result<Self, TransactionError> {
         let staging_dir = cas_inner.paths.staging_root_path();
