@@ -158,6 +158,34 @@ impl<const LEN: usize> KeyBytes for [u8; LEN] {
     }
 }
 
+macro_rules! impl_primitive_key_bytes {
+    ($($ty:ty: $n:literal),* $(,)?) => {$(
+        impl KeyBytes for $ty {
+            type Bytes = [u8; $n];
+
+            #[inline]
+            fn to_key_bytes(&self) -> Self::Bytes {
+                self.to_le_bytes()
+            }
+
+            #[inline]
+            fn to_key_bytes_owned(&self) -> Vec<u8> {
+                self.to_le_bytes().to_vec()
+            }
+
+            #[inline]
+            fn from_key_bytes(bytes: &[u8]) -> Option<Self> {
+                Self::Bytes::try_from(bytes).map(<$ty>::from_le_bytes).ok()
+            }
+        }
+    )*};
+}
+
+impl_primitive_key_bytes!(
+    i8: 1, i16: 2, i32: 4, i64: 8, i128: 16,
+    u8: 1, u16: 2, u32: 4, u64: 8, u128: 16,
+);
+
 // === config ===
 #[derive(Clone, Copy, Debug, Default)]
 pub enum SyncMode {

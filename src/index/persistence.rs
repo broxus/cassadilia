@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fmt::Debug;
 
 use thiserror::Error;
@@ -72,14 +71,7 @@ impl<'a> IndexStatePersister<'a> {
         let index_path = self.paths.index_file_path();
         let index_tmp_path = self.paths.index_tmp_path();
 
-        // convert keys to bytes and build BTreeMap<Vec<u8>, BlobHash>
-        let mut key_bytes_to_hash = BTreeMap::new();
-        for (key, hash) in &state.key_to_hash {
-            let key_bytes = key.to_key_bytes_owned();
-            key_bytes_to_hash.insert(key_bytes, *hash);
-        }
-
-        let data_bytes = serialize_index_state(&key_bytes_to_hash)?;
+        let data_bytes = serialize_index_state(&state.key_to_hash);
 
         atomically_write_file_bytes(index_path, index_tmp_path, &data_bytes)?;
 
