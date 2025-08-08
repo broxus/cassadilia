@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 use crate::index::IndexStateItem;
-use crate::types::{BlobHash, HASH_SIZE, WalOpRaw};
+use crate::types::{BlobHash, HASH_SIZE, KeyBytes, WalOpRaw};
 
 #[derive(Error, Debug)]
 pub enum SerializationError {
@@ -26,9 +26,7 @@ pub enum SerializationError {
 
 /// serialize `BTreeMap`<Vec<u8>, `IndexStateItem`> using hand-rolled format
 /// format: [u32 `num_entries`][[u32 `key_len`][key_bytes][`32_bytes_hash`]]...
-pub(crate) fn serialize_index_state(
-    map: &BTreeMap<Vec<u8>, IndexStateItem>,
-) -> Result<Vec<u8>, SerializationError> {
+pub(crate) fn serialize_index_state<K: KeyBytes>(map: &BTreeMap<K, IndexStateItem>) -> Vec<u8> {
     let mut result = Vec::new();
 
     // write number of entries
@@ -37,12 +35,15 @@ pub(crate) fn serialize_index_state(
 
     // write each entry
     for (key, item) in map {
+        let key_bytes = key.to_key_bytes();
+        let key_bytes = key_bytes.as_ref();
+
         // write key length
-        let key_len = key.len() as u32;
+        let key_len = key_bytes.len() as u32;
         result.extend_from_slice(&key_len.to_le_bytes());
 
         // write key bytes
-        result.extend_from_slice(key);
+        result.extend_from_slice(key_bytes);
 
         // write hash (always 32 bytes)
         result.extend_from_slice(item.blob_hash.as_bytes());
@@ -51,7 +52,7 @@ pub(crate) fn serialize_index_state(
         result.extend_from_slice(&item.blob_size.to_le_bytes());
     }
 
-    Ok(result)
+    result
 }
 
 /// deserialize `BTreeMap`<Vec<u8>, `IndexStateItem`> using hand-rolled format
@@ -252,20 +253,31 @@ mod tests {
         IndexStateItem { blob_hash: BlobHash::from_bytes(bytes), blob_size: 1 }
     }
 
+    fn deserialize_and_parse_index_state<K>(data: Vec<u8>) -> BTreeMap<K, IndexStateItem>
+    where
+        K: KeyBytes + Ord,
+    {
+        deserialize_index_state(&data)
+            .unwrap()
+            .into_iter()
+            .map(|(key, value)| (K::from_key_bytes(&key).unwrap(), value))
+            .collect()
+    }
+
     #[test]
     fn test_btreemap_serialization_empty() {
-        let map: BTreeMap<Vec<u8>, IndexStateItem> = BTreeMap::new();
-        let serialized = serialize_index_state(&map).unwrap();
-        let deserialized = deserialize_index_state(&serialized).unwrap();
+        let map: BTreeMap<[u8; 0], IndexStateItem> = BTreeMap::new();
+        let serialized = serialize_index_state(&map);
+        let deserialized = deserialize_and_parse_index_state(serialized);
         assert_eq!(map, deserialized);
     }
 
     #[test]
     fn test_btreemap_serialization_single_empty_key() {
         let mut map = BTreeMap::new();
-        map.insert(vec![], make_test_item(1));
-        let serialized = serialize_index_state(&map).unwrap();
-        let deserialized = deserialize_index_state(&serialized).unwrap();
+        map.insert([], make_test_item(1));
+        let serialized = serialize_index_state(&map);
+        let deserialized = deserialize_and_parse_index_state(serialized);
         assert_eq!(map, deserialized);
     }
 
@@ -277,8 +289,8 @@ mod tests {
         map.insert(vec![255; 1000], make_test_item(3)); // large key
         map.insert(vec![0], make_test_item(4)); // single byte key
 
-        let serialized = serialize_index_state(&map).unwrap();
-        let deserialized = deserialize_index_state(&serialized).unwrap();
+        let serialized = serialize_index_state(&map);
+        let deserialized = deserialize_and_parse_index_state(serialized);
         assert_eq!(map, deserialized);
     }
 

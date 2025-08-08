@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fmt::Debug;
 
 use thiserror::Error;
@@ -7,7 +6,7 @@ use super::state::IndexState;
 use crate::io::{IoError, atomically_write_file_bytes};
 use crate::paths::DbPaths;
 use crate::serialization::{SerializationError, deserialize_index_state, serialize_index_state};
-use crate::types::{KeyEncoder, KeyEncoderError};
+use crate::types::KeyBytes;
 
 pub(crate) struct IndexStatePersister<'a> {
     paths: &'a DbPaths,
@@ -18,9 +17,9 @@ impl<'a> IndexStatePersister<'a> {
         Self { paths }
     }
 
-    pub fn load<K>(&self, key_encoder: &dyn KeyEncoder<K>) -> Result<IndexState<K>, PersisterError>
+    pub fn load<K>(&self) -> Result<IndexState<K>, PersisterError>
     where
-        K: Clone + Eq + Ord + Debug + Send + Sync + 'static,
+        K: KeyBytes + Clone + Eq + Ord + Debug + Send + Sync + 'static,
     {
         let index_path = self.paths.index_file_path();
         let mut state = IndexState::new();
@@ -40,7 +39,9 @@ impl<'a> IndexStatePersister<'a> {
                 state.hash_to_ref_count.clear();
 
                 for (key_bytes, item) in loaded_key_bytes_to_hash {
-                    let key = key_encoder.decode(&key_bytes).map_err(PersisterError::DecodeKey)?;
+                    let Some(key) = K::from_key_bytes(&key_bytes) else {
+                        return Err(PersisterError::DecodeKey);
+                    };
                     state.key_to_hash.insert(key, item);
                     state.increment_ref(&item.blob_hash);
                 }
@@ -63,25 +64,14 @@ impl<'a> IndexStatePersister<'a> {
         Ok(state)
     }
 
-    pub fn save<K>(
-        &self,
-        state: &IndexState<K>,
-        key_encoder: &dyn KeyEncoder<K>,
-    ) -> Result<(), PersisterError>
+    pub fn save<K>(&self, state: &IndexState<K>) -> Result<(), PersisterError>
     where
-        K: Clone + Eq + Ord + Debug + Send + Sync + 'static,
+        K: KeyBytes + Clone + Eq + Ord + Debug + Send + Sync + 'static,
     {
         let index_path = self.paths.index_file_path();
         let index_tmp_path = self.paths.index_tmp_path();
 
-        // convert keys to bytes and build BTreeMap<Vec<u8>, BlobHash>
-        let mut key_bytes_to_hash = BTreeMap::new();
-        for (key, hash) in &state.key_to_hash {
-            let key_bytes = key_encoder.encode(key).map_err(PersisterError::EncodeKey)?;
-            key_bytes_to_hash.insert(key_bytes, *hash);
-        }
-
-        let data_bytes = serialize_index_state(&key_bytes_to_hash)?;
+        let data_bytes = serialize_index_state(&state.key_to_hash);
 
         atomically_write_file_bytes(index_path, index_tmp_path, &data_bytes)?;
 
@@ -101,9 +91,7 @@ pub enum PersisterError {
     #[error("Persister: Failed to decode index data")]
     DecodeIndex(#[from] SerializationError),
     #[error("Persister: Failed to decode key from index")]
-    DecodeKey(#[source] KeyEncoderError),
-    #[error("Persister: Failed to encode key for persistence")]
-    EncodeKey(#[source] KeyEncoderError),
+    DecodeKey,
     #[error("Persister: Failed to atomically write index state")]
     AtomicWrite(#[from] IoError),
 }

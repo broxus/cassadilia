@@ -1,9 +1,6 @@
-use std::sync::Arc;
-
 use super::storage::SegmentStorage;
-use crate::KeyEncoder;
 use crate::serialization::deserialize_wal_op_raw;
-use crate::types::{CheckpointState, WalOp};
+use crate::types::{CheckpointState, KeyBytes, WalOp};
 use crate::wal::WalError;
 
 pub(crate) struct WalReplayer<'a> {
@@ -25,11 +22,10 @@ impl<'a> WalReplayer<'a> {
     // returns the highest operation version found in the WAL.
     // in wal/replay.rs
 
-    pub(crate) fn replay<K: Clone + Eq + Ord + std::fmt::Debug + 'static>(
-        &self,
-        key_encoder: Arc<dyn KeyEncoder<K> + Send + Sync + 'static>,
-        mut apply_op_fn: impl FnMut(WalOp<K>),
-    ) -> Result<u64, WalError> {
+    pub(crate) fn replay<K>(&self, mut apply_op_fn: impl FnMut(WalOp<K>)) -> Result<u64, WalError>
+    where
+        K: KeyBytes + Clone + Eq + Ord + std::fmt::Debug + 'static,
+    {
         // If a checkpoint exists for segment N, the highest version from segments 0..N-1
         // is N * num_ops_per_wal. This is our baseline.
         let mut highest_op_version = match self.checkpoint_state {
@@ -103,12 +99,10 @@ impl<'a> WalReplayer<'a> {
                         }
                     })?;
 
-                    let op = WalOp::from_raw(op, &key_encoder).map_err(|e| {
-                        WalError::ReplayConvertWalOp {
-                            version: entry.version,
-                            segment_id: segment.id,
-                            source: e,
-                        }
+                    let op = WalOp::from_raw(op).map_err(|e| WalError::ReplayConvertWalOp {
+                        version: entry.version,
+                        segment_id: segment.id,
+                        source: e,
                     })?;
 
                     apply_op_fn(op);

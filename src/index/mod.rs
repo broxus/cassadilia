@@ -12,10 +12,9 @@ use state::{IndexState, IndexStateError};
 use thiserror::Error;
 
 pub use self::state::IndexStateItem;
-use crate::KeyEncoder;
 use crate::paths::DbPaths;
 use crate::serialization::serialize_wal_op_raw;
-use crate::types::{BlobHash, Config, KeyEncoderError, WalOp};
+use crate::types::{BlobHash, Config, KeyBytes, WalOp};
 use crate::wal::{WalAppendInfo, WalError, WalManager};
 
 mod persistence;
@@ -58,9 +57,6 @@ pub enum IndexError {
     #[error("WAL operation failed")]
     Wal(#[from] WalError),
 
-    #[error("WalOpToRaw: Key encoding failed")]
-    WalOpToRawEncodeKey(#[source] KeyEncoderError),
-
     #[error("ApplyWalOp: Failed to serialize WalOpRaw")]
     ApplyWalOpSerialize(#[source] crate::serialization::SerializationError),
     #[error("ApplyWalOp: Failed to write WAL entry")]
@@ -94,7 +90,7 @@ pub(crate) struct IntentMeta {
 
 impl<K> IntentGuard<'_, K>
 where
-    K: Clone + Eq + Ord + std::hash::Hash + Debug + Send + Sync + 'static,
+    K: KeyBytes + Clone + Eq + Ord + std::hash::Hash + Debug + Send + Sync + 'static,
 {
     /// Commit the intent by applying the WAL operation and removing the intent.
     /// Returns a list of blob hashes that are no longer referenced.
@@ -143,7 +139,6 @@ where
 
 pub(crate) struct Index<K> {
     pub paths: DbPaths,
-    pub key_encoder: Arc<dyn KeyEncoder<K>>,
     pub state: Arc<RwLock<IndexState<K>>>,
     pub wal: Mutex<WalManager>,
     pub pending_intents: Mutex<HashMap<K, BlobHash>>,
@@ -151,13 +146,9 @@ pub(crate) struct Index<K> {
 
 impl<K> Index<K>
 where
-    K: Clone + Eq + Ord + std::hash::Hash + Debug + Send + Sync + 'static,
+    K: KeyBytes + Clone + Eq + Ord + std::hash::Hash + Debug + Send + Sync + 'static,
 {
-    pub fn load(
-        db_root: PathBuf,
-        key_encoder: Arc<dyn KeyEncoder<K>>,
-        config: Config,
-    ) -> Result<Self, IndexError> {
+    pub fn load(db_root: PathBuf, config: Config) -> Result<Self, IndexError> {
         Self::initialize_directories(&db_root)?;
         let paths = DbPaths::new(db_root.clone());
         let mut wal_manager = WalManager::new(paths.clone(), config.num_ops_per_wal)
@@ -166,15 +157,14 @@ where
         wal_manager.load_checkpoint_metadata()?;
 
         let persister = IndexStatePersister::new(&paths);
-        let state = persister.load(key_encoder.as_ref())?;
+        let state = persister.load()?;
         let state = Arc::new(RwLock::new(state));
-        wal_manager.replay_and_prepare(key_encoder.clone(), |op| {
+        wal_manager.replay_and_prepare(|op| {
             let _ = state.write().apply_logical_op(&op).expect("Index is corrupted");
         })?;
 
         let index = Self {
             paths,
-            key_encoder,
             state,
             wal: Mutex::new(wal_manager),
             pending_intents: Mutex::new(HashMap::default()),
@@ -191,8 +181,7 @@ where
 
     pub fn apply_wal_op_unsafe(&self, logical_op: &WalOp<K>) -> Result<Vec<BlobHash>, IndexError> {
         let op_data =
-            logical_op.to_raw(&self.key_encoder).map_err(IndexError::WalOpToRawEncodeKey)?;
-        let op_data = serialize_wal_op_raw(&op_data).map_err(IndexError::ApplyWalOpSerialize)?;
+            serialize_wal_op_raw(&logical_op.to_raw()).map_err(IndexError::ApplyWalOpSerialize)?;
 
         let WalAppendInfo { version, .. } = {
             let mut wal_guard = self.wal.lock();
@@ -234,15 +223,18 @@ where
                 }
             }
 
-            let persister = IndexStatePersister::new(&self.paths);
-            persister.save(&snapshot, self.key_encoder.as_ref())?;
+            IndexStatePersister::new(&self.paths).save(&snapshot)?;
         }
 
         tracing::info!("Checkpoint completed successfully.");
         Ok(())
     }
 
-    pub fn register_intent(&self, key: K, meta: IntentMeta) -> Result<IntentGuard<K>, IndexError> {
+    pub fn register_intent(
+        &self,
+        key: K,
+        meta: IntentMeta,
+    ) -> Result<IntentGuard<'_, K>, IndexError> {
         let mut intents = self.pending_intents.lock();
         let mut state = self.state.write();
 
@@ -382,19 +374,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use tempfile::tempdir;
 
     use super::*;
     use crate::Config;
-    use crate::tests::utils::encoders::StringEncoder;
 
     fn setup_test_index() -> (tempfile::TempDir, Index<String>) {
         let dir = tempdir().unwrap();
-        let index =
-            Index::load(dir.path().to_path_buf(), Arc::new(StringEncoder), Config::default())
-                .unwrap();
+        let index = Index::load(dir.path().to_path_buf(), Config::default()).unwrap();
         (dir, index)
     }
 
