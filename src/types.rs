@@ -101,17 +101,61 @@ impl AsRef<[u8]> for BlobHash {
     }
 }
 
-#[derive(Error, Debug, Clone, PartialEq)]
-pub enum KeyEncoderError {
-    #[error("Failed to encode key")]
-    EncodeError,
-    #[error("Failed to decode key")]
-    DecodeError,
+pub trait KeyBytes: Sized {
+    type Bytes: AsRef<[u8]> + AsMut<[u8]>;
+
+    fn to_key_bytes(&self) -> Self::Bytes;
+
+    #[inline]
+    fn to_key_bytes_owned(&self) -> Vec<u8> {
+        self.to_key_bytes().as_ref().to_vec()
+    }
+
+    fn from_key_bytes(bytes: &[u8]) -> Option<Self>;
 }
 
-pub trait KeyEncoder<K>: Send + Sync + 'static {
-    fn encode(&self, key: &K) -> Result<Vec<u8>, KeyEncoderError>;
-    fn decode(&self, data: &[u8]) -> Result<K, KeyEncoderError>;
+impl KeyBytes for String {
+    type Bytes = Vec<u8>;
+
+    fn to_key_bytes(&self) -> Self::Bytes {
+        self.as_bytes().to_vec()
+    }
+
+    fn to_key_bytes_owned(&self) -> Vec<u8> {
+        self.as_bytes().to_vec()
+    }
+
+    fn from_key_bytes(bytes: &[u8]) -> Option<Self> {
+        str::from_utf8(bytes).map(String::from).ok()
+    }
+}
+
+impl KeyBytes for Vec<u8> {
+    type Bytes = Vec<u8>;
+
+    fn to_key_bytes(&self) -> Self::Bytes {
+        self.clone()
+    }
+
+    fn to_key_bytes_owned(&self) -> Vec<u8> {
+        self.clone()
+    }
+
+    fn from_key_bytes(bytes: &[u8]) -> Option<Self> {
+        Some(Self::from(bytes))
+    }
+}
+
+impl<const LEN: usize> KeyBytes for [u8; LEN] {
+    type Bytes = [u8; LEN];
+
+    fn to_key_bytes(&self) -> Self::Bytes {
+        *self
+    }
+
+    fn from_key_bytes(bytes: &[u8]) -> Option<Self> {
+        Self::try_from(bytes).ok()
+    }
 }
 
 // === config ===
@@ -168,27 +212,21 @@ pub enum WalOp<K> {
     Remove { keys: Vec<K> },
 }
 
-impl<K> WalOp<K> {
-    pub fn from_raw(
-        raw_op: WalOpRaw,
-        key_encoder: &Arc<dyn KeyEncoder<K> + Send + Sync>,
-    ) -> Result<Self, TypesError>
-    where
-        K: 'static,
-    {
+impl<K: KeyBytes> WalOp<K> {
+    pub fn from_raw(raw_op: WalOpRaw) -> Result<Self, TypesError> {
         match raw_op {
             WalOpRaw::Put { key_bytes, hash, size } => {
-                let key = key_encoder
-                    .decode(&key_bytes)
-                    .map_err(|e| TypesError::DecodeKeyPutFailed { source: e })?;
+                let Some(key) = K::from_key_bytes(&key_bytes) else {
+                    return Err(TypesError::DecodeKeyPutFailed);
+                };
                 Ok(WalOp::Put { key, hash, size })
             }
             WalOpRaw::Remove { keys_bytes } => {
                 let mut keys = Vec::new();
                 for (i, key_bytes) in keys_bytes.iter().enumerate() {
-                    let key = key_encoder
-                        .decode(key_bytes)
-                        .map_err(|e| TypesError::RemoveDecodeKey { index: i, source: e })?;
+                    let Some(key) = K::from_key_bytes(key_bytes) else {
+                        return Err(TypesError::RemoveDecodeKey { index: i });
+                    };
                     keys.push(key);
                 }
                 Ok(WalOp::Remove { keys })
@@ -196,22 +234,18 @@ impl<K> WalOp<K> {
         }
     }
 
-    pub fn to_raw(&self, key_encoder: &Arc<dyn KeyEncoder<K>>) -> Result<WalOpRaw, KeyEncoderError>
-    where
-        K: 'static,
-    {
+    pub fn to_raw(&self) -> WalOpRaw {
         match self {
             WalOp::Put { key, hash, size } => {
-                let key_bytes = key_encoder.encode(key)?;
-                Ok(WalOpRaw::Put { key_bytes, hash: *hash, size: *size })
+                let key_bytes = key.to_key_bytes_owned();
+                WalOpRaw::Put { key_bytes, hash: *hash, size: *size }
             }
             WalOp::Remove { keys } => {
                 let mut keys_bytes = Vec::new();
                 for key in keys {
-                    let key_bytes = key_encoder.encode(key)?;
-                    keys_bytes.push(key_bytes);
+                    keys_bytes.push(key.to_key_bytes_owned());
                 }
-                Ok(WalOpRaw::Remove { keys_bytes })
+                WalOpRaw::Remove { keys_bytes }
             }
         }
     }
@@ -233,17 +267,9 @@ pub enum TypesError {
     #[error("Remove: insufficient data for key bytes at index {index}")]
     RemoveInsufficientDataKeyBytes { index: usize },
     #[error("Remove: failed to decode key at index {index}")]
-    RemoveDecodeKey {
-        index: usize,
-        #[source]
-        source: KeyEncoderError,
-    },
-
+    RemoveDecodeKey { index: usize },
     #[error("Failed to decode key for Put operation")]
-    DecodeKeyPutFailed {
-        #[source]
-        source: KeyEncoderError,
-    },
+    DecodeKeyPutFailed,
 }
 
 // === WAL ===

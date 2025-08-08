@@ -1,14 +1,27 @@
 use std::fs::File;
 use std::io::Write;
-use std::sync::Arc;
 
 use tempfile::tempdir;
 
 use super::*;
 use crate::paths::DbPaths;
 use crate::serialization::serialize_wal_op_raw;
-use crate::tests::utils::encoders::{FailingKeyEncoder, TestKeyEncoder};
 use crate::types::{BlobHash, WalOpRaw};
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TestKey(pub u64);
+
+impl KeyBytes for TestKey {
+    type Bytes = [u8; 8];
+
+    fn to_key_bytes(&self) -> Self::Bytes {
+        self.0.to_le_bytes()
+    }
+
+    fn from_key_bytes(bytes: &[u8]) -> Option<Self> {
+        <[u8; 8]>::try_from(bytes).map(u64::from_le_bytes).map(Self).ok()
+    }
+}
 
 // --- Test Setup ---
 
@@ -129,7 +142,7 @@ fn replay_fails_on_key_decode_error() {
     wal_manager.active_writer.take().unwrap().close().unwrap();
 
     // Replay with an encoder that is guaranteed to fail decoding.
-    let result = wal_manager.replay_and_prepare(Arc::new(FailingKeyEncoder), |_| {});
+    let result = wal_manager.replay_and_prepare::<TestKey>(|_| {});
 
     assert!(matches!(result, Err(WalError::ReplayConvertWalOp { .. })));
 }
@@ -161,7 +174,7 @@ fn replay_fails_on_corrupted_op_entry() {
     drop(file);
 
     // Replay should fail with an I/O error when trying to read past the end of the file.
-    let result = wal_manager.replay_and_prepare(Arc::new(TestKeyEncoder), |_| {});
+    let result = wal_manager.replay_and_prepare::<TestKey>(|_| {});
 
     assert!(
         matches!(result, Err(WalError::ReplayIo { step: WalReplayIoStep::ReadOpData, .. })),
@@ -188,7 +201,7 @@ fn replay_should_ignore_segments_before_checkpoint() {
     new_wal_manager.load_checkpoint_metadata().unwrap();
 
     let mut replayed_ops_count = 0;
-    let result = new_wal_manager.replay_and_prepare(Arc::new(TestKeyEncoder), |_| {
+    let result = new_wal_manager.replay_and_prepare::<TestKey>(|_| {
         replayed_ops_count += 1;
     });
     assert!(result.is_ok());
@@ -214,7 +227,7 @@ fn replay_on_completely_empty_directory() {
     wal_manager.load_checkpoint_metadata().unwrap();
 
     let mut replayed_ops = Vec::new();
-    let result = wal_manager.replay_and_prepare(Arc::new(TestKeyEncoder), |op| {
+    let result = wal_manager.replay_and_prepare::<TestKey>(|op| {
         replayed_ops.push(op);
     });
 

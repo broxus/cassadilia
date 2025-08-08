@@ -7,7 +7,7 @@ use std::time::Duration;
 use ahash::{HashMap, HashSet};
 
 use crate::types::BlobHash;
-use crate::{CasInner, LibError, LibIoOperation};
+use crate::{CasInner, KeyBytes, LibError, LibIoOperation};
 
 #[derive(Debug)]
 struct ExpectedMeta {
@@ -181,7 +181,7 @@ pub(crate) fn scan_orphans<K>(
     verify_integrity: bool,
 ) -> Result<OrphanStats<K>, LibError>
 where
-    K: Clone + Eq + Ord + Hash + Debug + Send + Sync + 'static,
+    K: KeyBytes + Clone + Eq + Ord + Hash + Debug + Send + Sync + 'static,
 {
     let start_time = std::time::Instant::now();
     let mut orphaned_blobs = Vec::new();

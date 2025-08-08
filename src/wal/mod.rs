@@ -2,7 +2,6 @@
 mod tests;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use checkpoint::CheckpointPersister;
 use replay::WalReplayer;
@@ -13,7 +12,7 @@ use crate::io::IoError;
 use crate::paths::DbPaths;
 use crate::serialization::SerializationError;
 use crate::types::{BlobHash, CheckpointState, TypesError, WalOp};
-use crate::{KeyEncoder, calculate_blob_hash};
+use crate::{KeyBytes, calculate_blob_hash};
 
 mod checkpoint;
 mod replay;
@@ -165,18 +164,20 @@ impl WalManager {
         current_version
     }
 
-    pub(crate) fn replay_and_prepare<K: Clone + Eq + Ord + std::fmt::Debug + 'static>(
+    pub(crate) fn replay_and_prepare<K>(
         &mut self,
-        key_encoder: Arc<dyn KeyEncoder<K> + Send + Sync + 'static>,
         apply_op_fn: impl FnMut(WalOp<K>),
-    ) -> Result<(), WalError> {
+    ) -> Result<(), WalError>
+    where
+        K: KeyBytes + Clone + Eq + Ord + std::fmt::Debug + 'static,
+    {
         let replayer = WalReplayer::new(
             &self.storage,
             self.last_checkpointed_segment_id,
             self.num_ops_per_wal,
         );
 
-        let highest_op_version = replayer.replay(key_encoder, apply_op_fn)?;
+        let highest_op_version = replayer.replay(apply_op_fn)?;
         self.next_op_version = highest_op_version + 1;
 
         // ensure next segment file exists using self.storage

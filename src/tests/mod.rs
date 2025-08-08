@@ -7,7 +7,6 @@ use anyhow::Result;
 use tempfile::tempdir;
 
 use crate::index::CHECKPOINT_META_FILENAME;
-use crate::tests::utils::encoders::{StringEncoder, VecU8Encoder};
 use crate::{Cas, Config, LibError, LibIoOperation, SyncMode};
 
 fn setup_tracing() {
@@ -20,7 +19,7 @@ fn setup_tracing() {
 fn test_put_get_remove_string_key() -> Result<()> {
     setup_tracing();
     let dir = tempdir()?;
-    let cas = Cas::open(dir.path(), StringEncoder, Config::default())?;
+    let cas = Cas::open(dir.path(), Config::default())?;
 
     let key = "my_first_blob".to_string();
     let data = b"Hello, Bubs!";
@@ -45,7 +44,7 @@ fn test_put_get_remove_string_key() -> Result<()> {
 fn test_put_get_remove_bytes_key() -> Result<()> {
     setup_tracing();
     let dir = tempdir()?;
-    let cas = Cas::open(dir.path(), VecU8Encoder, Config::default())?;
+    let cas = Cas::open(dir.path(), Config::default())?;
 
     let key = b"my_bytes_blob".to_vec();
     let data = b"rofls";
@@ -67,7 +66,7 @@ fn test_put_get_remove_bytes_key() -> Result<()> {
 fn test_get_range() -> Result<()> {
     setup_tracing();
     let dir = tempdir()?;
-    let cas = Cas::open(dir.path(), StringEncoder, Config::default())?;
+    let cas = Cas::open(dir.path(), Config::default())?;
 
     let key = "range_blob".to_string();
     let data = b"0123456789abcdef";
@@ -101,7 +100,7 @@ fn test_overwrite_persists_across_reopen() -> Result<()> {
     let key = "overwrite_test".to_string();
 
     {
-        let cas = Cas::open(db_path, StringEncoder, Config::default())?;
+        let cas = Cas::open(db_path, Config::default())?;
         let mut tx = cas.put(key.clone())?;
         tx.write(b"Version 1")?;
         tx.finish()?;
@@ -110,7 +109,7 @@ fn test_overwrite_persists_across_reopen() -> Result<()> {
     }
 
     {
-        let cas = Cas::open(db_path, StringEncoder, Config::default())?;
+        let cas = Cas::open(db_path, Config::default())?;
         assert_eq!(cas.get(&key)?.unwrap().as_ref(), b"Version 1");
 
         let mut tx = cas.put(key.clone())?;
@@ -121,7 +120,7 @@ fn test_overwrite_persists_across_reopen() -> Result<()> {
     }
 
     {
-        let cas = Cas::open(db_path, StringEncoder, Config::default())?;
+        let cas = Cas::open(db_path, Config::default())?;
         let retrieved = cas.get(&key)?.unwrap();
         assert_eq!(retrieved.as_ref(), b"Version 2 is better");
     }
@@ -136,7 +135,7 @@ fn test_remove_persists_across_reopen() -> Result<()> {
     let key = "remove_persist_test".to_string();
 
     {
-        let cas = Cas::open(db_path, StringEncoder, Config::default())?;
+        let cas = Cas::open(db_path, Config::default())?;
         let mut tx = cas.put(key.clone())?;
         tx.write(b"Data to be removed")?;
         tx.finish()?;
@@ -147,7 +146,7 @@ fn test_remove_persists_across_reopen() -> Result<()> {
     }
 
     {
-        let cas = Cas::open(db_path, StringEncoder, Config::default())?;
+        let cas = Cas::open(db_path, Config::default())?;
         assert!(cas.get(&key)?.is_none(), "data should still be removed after reopen");
     }
     Ok(())
@@ -157,7 +156,7 @@ fn test_remove_persists_across_reopen() -> Result<()> {
 fn test_transaction_drop_cleans_up_staging_file() -> Result<()> {
     setup_tracing();
     let dir = tempdir()?;
-    let cas = Cas::open(dir.path(), StringEncoder, Config::default())?;
+    let cas = Cas::open(dir.path(), Config::default())?;
     let key = "dropped_tx_key".to_string();
 
     let staging_path;
@@ -186,7 +185,7 @@ fn test_checkpoint_persists_index() -> Result<()> {
     let checkpoint_meta_path = db_path.join(CHECKPOINT_META_FILENAME);
 
     {
-        let cas = Cas::open(db_path, StringEncoder, Config::default())?;
+        let cas = Cas::open(db_path, Config::default())?;
         let mut tx = cas.put("key1".to_string())?;
         tx.write(b"data1")?;
         tx.finish()?;
@@ -201,7 +200,7 @@ fn test_checkpoint_persists_index() -> Result<()> {
 
     {
         // Reopen and ensure data is loaded correctly, proving the checkpoint worked.
-        let cas = Cas::open(db_path, StringEncoder, Config::default())?;
+        let cas = Cas::open(db_path, Config::default())?;
         assert_eq!(cas.get(&"key1".to_string())?.unwrap().as_ref(), b"data1");
     }
     Ok(())
@@ -225,7 +224,7 @@ fn test_wal_rollover_and_cleanup() -> Result<()> {
     let wal1_path = db_path.join("1_index.wal");
 
     {
-        let cas = Cas::open(db_path, StringEncoder, config.clone())?;
+        let cas = Cas::open(db_path, config.clone())?;
         let mut tx = cas.put("key1".to_string())?;
         tx.write(b"d1")?;
         tx.finish()?;
@@ -251,7 +250,7 @@ fn test_wal_rollover_and_cleanup() -> Result<()> {
     }
 
     {
-        let cas = Cas::open(db_path, StringEncoder, config)?;
+        let cas = Cas::open(db_path, config)?;
         assert_eq!(cas.get(&"key1".to_string())?.unwrap().as_ref(), b"d1");
         assert_eq!(cas.get(&"key2".to_string())?.unwrap().as_ref(), b"d2");
         assert_eq!(cas.get(&"key3".to_string())?.unwrap().as_ref(), b"d3");
@@ -267,7 +266,7 @@ fn test_remove_range_persists() -> Result<()> {
     let db_path = dir.path();
 
     {
-        let cas = Cas::open(db_path, StringEncoder, Config::default())?;
+        let cas = Cas::open(db_path, Config::default())?;
         for i in 1..=4 {
             let mut tx = cas.put(format!("key_{i}"))?;
             tx.write(format!("data_{i}",).as_bytes())?;
@@ -284,7 +283,7 @@ fn test_remove_range_persists() -> Result<()> {
     }
 
     {
-        let cas = Cas::open(db_path, StringEncoder, Config::default())?;
+        let cas = Cas::open(db_path, Config::default())?;
         assert!(cas.get(&"key_1".to_string())?.is_none());
         assert!(cas.get(&"key_2".to_string())?.is_none());
         assert!(cas.get(&"key_3".to_string())?.is_some());
@@ -300,7 +299,7 @@ fn test_remove_range_persists() -> Result<()> {
 fn test_api_on_nonexistent_key() -> Result<()> {
     setup_tracing();
     let dir = tempdir()?;
-    let cas = Cas::open(dir.path(), StringEncoder, Config::default())?;
+    let cas = Cas::open(dir.path(), Config::default())?;
     let key = "nonexistent_key".to_string();
 
     let result = cas.get_reader(&key).unwrap();
@@ -321,7 +320,7 @@ fn test_api_on_nonexistent_key() -> Result<()> {
 fn test_io_error_on_staging_file_creation() -> anyhow::Result<()> {
     setup_tracing();
     let dir = tempdir()?;
-    let cas = Cas::open(dir.path(), StringEncoder, Config::default())?;
+    let cas = Cas::open(dir.path(), Config::default())?;
 
     // make the staging directory read-only to force a permissions error.
     let staging_dir = dir.path().join("staging");
@@ -348,7 +347,7 @@ fn test_orphan_detection_and_cleanup() -> Result<()> {
     let dir = tempdir()?;
 
     // First, create a CAS with some valid data
-    let cas = Cas::open(dir.path(), StringEncoder, Config::default())?;
+    let cas = Cas::open(dir.path(), Config::default())?;
 
     // Add some valid data
     let key1 = "valid_key1".to_string();
@@ -384,7 +383,7 @@ fn test_orphan_detection_and_cleanup() -> Result<()> {
 
     // Reopen with recovery to get orphan stats
     let config = Config { scan_orphans_on_startup: true, ..Default::default() };
-    let (cas, orphan_stats) = Cas::open_with_recover(dir.path(), StringEncoder, config)?;
+    let (cas, orphan_stats) = Cas::open_with_recover(dir.path(), config)?;
 
     // Should have orphan stats
     let stats = orphan_stats.expect("Should have orphan stats");
@@ -417,7 +416,7 @@ fn test_orphan_detection_with_integrity_check() -> Result<()> {
     let dir = tempdir()?;
 
     // Create a CAS with some valid data
-    let cas = Cas::open(dir.path(), StringEncoder, Config::default())?;
+    let cas = Cas::open(dir.path(), Config::default())?;
 
     let key1 = "valid_key1".to_string();
     let data1 = b"valid data 1";
@@ -441,7 +440,7 @@ fn test_orphan_detection_with_integrity_check() -> Result<()> {
         ..Default::default()
     };
 
-    let result = Cas::open(dir.path(), StringEncoder, config);
+    let result = Cas::<String>::open(dir.path(), config);
 
     // Should fail due to corrupted blob
     match result {
@@ -461,7 +460,7 @@ fn test_orphan_detection_with_missing_blobs() -> Result<()> {
     let dir = tempdir()?;
 
     // Create a CAS with some data
-    let cas = Cas::open(dir.path(), StringEncoder, Config::default())?;
+    let cas = Cas::open(dir.path(), Config::default())?;
 
     let key1 = "key1".to_string();
     let data1 = b"data 1";
@@ -484,7 +483,7 @@ fn test_orphan_detection_with_missing_blobs() -> Result<()> {
         ..Default::default()
     };
 
-    let result = Cas::open(dir.path(), StringEncoder, config);
+    let result = Cas::<String>::open(dir.path(), config);
 
     // Should fail due to missing blob
     match result {
@@ -504,7 +503,7 @@ fn test_orphan_quarantine() -> Result<()> {
     let dir = tempdir()?;
     let quarantine_dir = dir.path().join("quarantine");
 
-    let cas = Cas::open(dir.path(), StringEncoder, Config::default())?;
+    let cas = Cas::open(dir.path(), Config::default())?;
 
     // Add valid data
     let key1 = "key1".to_string();
@@ -526,7 +525,7 @@ fn test_orphan_quarantine() -> Result<()> {
 
     // Reopen with recovery
     let config = Config { scan_orphans_on_startup: true, ..Default::default() };
-    let (_cas, orphan_stats) = Cas::open_with_recover(dir.path(), StringEncoder, config)?;
+    let (_cas, orphan_stats) = Cas::<String>::open_with_recover(dir.path(), config)?;
     let stats = orphan_stats.expect("Should have orphan stats");
 
     // Quarantine orphans
@@ -546,7 +545,7 @@ fn test_orphan_stats_holds_lock() -> Result<()> {
     let dir = tempdir()?;
 
     // Create CAS with orphaned blob
-    let cas = Cas::open(dir.path(), StringEncoder, Config::default())?;
+    let cas = Cas::<String>::open(dir.path(), Config::default())?;
 
     let orphan_data = b"orphan";
     let orphan_hash = crate::calculate_blob_hash(orphan_data);
@@ -560,7 +559,7 @@ fn test_orphan_stats_holds_lock() -> Result<()> {
 
     // Reopen with recovery
     let config = Config { scan_orphans_on_startup: true, ..Default::default() };
-    let (_cas, orphan_stats) = Cas::open_with_recover(dir.path(), StringEncoder, config)?;
+    let (_cas, orphan_stats) = Cas::<String>::open_with_recover(dir.path(), config)?;
     let stats = orphan_stats.expect("Should have orphan stats");
 
     assert_eq!(stats.orphaned_blobs.len(), 1);
@@ -585,7 +584,7 @@ fn test_cleanup_disabled() -> Result<()> {
     setup_tracing();
     let dir = tempdir()?;
 
-    let cas = Cas::open(dir.path(), StringEncoder, Config::default())?;
+    let cas = Cas::<String>::open(dir.path(), Config::default())?;
 
     // Create orphaned blob
     let orphan_data = b"orphan";
@@ -600,7 +599,7 @@ fn test_cleanup_disabled() -> Result<()> {
 
     // Reopen with cleanup disabled
     let config = Config { scan_orphans_on_startup: false, ..Default::default() };
-    let (_cas, orphan_stats) = Cas::open_with_recover(dir.path(), StringEncoder, config)?;
+    let (_cas, orphan_stats) = Cas::<String>::open_with_recover(dir.path(), config)?;
 
     // Should have no orphan stats
     assert!(orphan_stats.is_none());

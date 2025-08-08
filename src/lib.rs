@@ -82,8 +82,6 @@ pub enum LibError {
     #[error("Settings error")]
     Settings(SettingsError),
 
-    #[error("Key encoder operation failed")]
-    KeyEncoderError(KeyEncoderError),
     #[error("Types error")]
     TypesError(TypesError),
 
@@ -130,16 +128,12 @@ impl<K> Deref for Cas<K> {
 
 impl<K> Cas<K>
 where
-    K: Clone + Eq + Ord + std::hash::Hash + Debug + Send + Sync + 'static,
+    K: KeyBytes + Clone + Eq + Ord + std::hash::Hash + Debug + Send + Sync + 'static,
 {
-    pub fn open(
-        db_root: impl AsRef<Path>,
-        key_encoder: impl KeyEncoder<K> + 'static,
-        config: Config,
-    ) -> Result<Self, LibError> {
+    pub fn open(db_root: impl AsRef<Path>, config: Config) -> Result<Self, LibError> {
         // Use open_with_recover internally and drop the stats
         let fail_on_integrity_errors = config.fail_on_integrity_errors;
-        let (cas, orphan_stats) = Self::open_with_recover(db_root, key_encoder, config)?;
+        let (cas, orphan_stats) = Self::open_with_recover(db_root, config)?;
 
         // Log orphan info if stats were collected
         if let Some(stats) = orphan_stats {
@@ -174,10 +168,9 @@ where
     /// Will hold a lock on the CAS directory while `OrphanStats` is alive.
     pub fn open_with_recover(
         db_root: impl AsRef<Path>,
-        key_encoder: impl KeyEncoder<K> + 'static,
         config: Config,
     ) -> Result<(Self, Option<OrphanStats<K>>), LibError> {
-        let inner = CasInner::new(db_root.as_ref().to_path_buf(), key_encoder, config.clone())?;
+        let inner = CasInner::new(db_root.as_ref().to_path_buf(), config.clone())?;
         let cas = Self(Arc::new(inner));
 
         let orphan_stats = if config.scan_orphans_on_startup {
@@ -215,15 +208,9 @@ where
 
 impl<K> CasInner<K>
 where
-    K: Clone + Eq + Ord + std::hash::Hash + Debug + Send + Sync + 'static,
+    K: KeyBytes + Clone + Eq + Ord + std::hash::Hash + Debug + Send + Sync + 'static,
 {
-    fn new(
-        db_root: PathBuf,
-        key_encoder: impl KeyEncoder<K> + 'static,
-        config: Config,
-    ) -> Result<Self, LibError> {
-        let key_encoder = Arc::new(key_encoder);
-
+    fn new(db_root: PathBuf, config: Config) -> Result<Self, LibError> {
         let fs_lock = FsLock::new();
         let paths = paths::DbPaths::new(db_root.clone());
 
@@ -286,7 +273,7 @@ where
 
         let cas_manager =
             Arc::new(CasManager::new(paths.clone(), fs_lock.clone(), dir_tree_is_pre_created));
-        let index = Index::load(db_root, key_encoder, config.clone()).map_err(LibError::Index)?;
+        let index = Index::load(db_root, config.clone()).map_err(LibError::Index)?;
 
         let datasync_channel = match config.sync_mode {
             SyncMode::Sync => None,
@@ -311,7 +298,7 @@ where
     }
 
     /// Start a new transaction for the given key.
-    pub fn put(&self, key: K) -> Result<Transaction<K>, LibError> {
+    pub fn put(&self, key: K) -> Result<Transaction<'_, K>, LibError> {
         Transaction::new(self, key).map_err(|e| match e {
             transaction::TransactionError::StagingFileIo { operation, path, source } => {
                 match operation {

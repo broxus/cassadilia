@@ -84,7 +84,6 @@ mod tests {
     use crate::tests::utils::directory_helpers::{
         analyze_directory_structure, count_directories_recursive, count_leaf_directories,
     };
-    use crate::tests::utils::encoders::StringEncoder;
     use crate::{Cas, Config, LibError, SyncMode};
 
     #[test]
@@ -101,7 +100,7 @@ mod tests {
         };
 
         {
-            let cas = Cas::open(db_path, StringEncoder, config.clone())?;
+            let cas = Cas::open(db_path, config.clone())?;
 
             // Verify that all directories exist using recursive counting
             let cas_root = db_path.join("cas");
@@ -140,7 +139,7 @@ mod tests {
 
         // Re-open database and verify settings are persisted
         {
-            let cas = Cas::open(db_path, StringEncoder, config)?;
+            let cas = Cas::open(db_path, config)?;
 
             // Should not recreate directories, just use existing ones
             let mut tx = cas.put("test_key2".to_string())?;
@@ -168,7 +167,7 @@ mod tests {
         };
 
         {
-            let _cas = Cas::open(db_path, StringEncoder, config)?;
+            let _cas = Cas::<String>::open(db_path, config)?;
         }
 
         // Try to re-open with different num_ops_per_wal
@@ -179,7 +178,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = Cas::open(db_path, StringEncoder, config2);
+        let result = Cas::<String>::open(db_path, config2);
         assert!(result.is_err());
 
         if let Err(LibError::Settings(SettingsError::ValidationFailed(msg))) = result {
@@ -204,7 +203,7 @@ mod tests {
         };
 
         {
-            let _cas = Cas::open(db_path, StringEncoder, config)?;
+            let _cas = Cas::<String>::open(db_path, config)?;
         }
 
         // Check that settings file was created and can be loaded correctly
