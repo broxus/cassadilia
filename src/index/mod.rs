@@ -367,6 +367,14 @@ where
         self.inner.key_to_hash.clone()
     }
 
+    pub fn len(&self) -> usize {
+        self.inner.key_to_hash.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.key_to_hash.is_empty()
+    }
+
     pub fn known_blobs(&self) -> std::collections::hash_map::Iter<'_, BlobHash, u32> {
         self.inner.hash_to_ref_count.iter()
     }
@@ -498,5 +506,24 @@ mod tests {
         assert_eq!(index.pending_intents.lock().len(), 0);
         // Note: ref count would normally be managed by the WAL operation in
         // apply_wal_op_with_intent
+    }
+
+    #[test]
+    fn test_index_read_guard_len() {
+        let (_tmpdir, index) = setup_test_index();
+
+        assert_eq!(index.read_state().len(), 0);
+        assert!(index.read_state().is_empty());
+
+        index
+            .apply_wal_op_unsafe(&WalOp::Put {
+                key: "a".to_string(),
+                hash: BlobHash::from([1u8; 32]),
+                size: 100,
+            })
+            .unwrap();
+
+        assert_eq!(index.read_state().len(), 1);
+        assert!(!index.read_state().is_empty());
     }
 }
