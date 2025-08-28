@@ -3,7 +3,6 @@ mod tests;
 
 use std::path::PathBuf;
 
-use checkpoint::CheckpointPersister;
 use replay::WalReplayer;
 use storage::{SegmentStorage, SegmentWriter};
 use thiserror::Error;
@@ -11,10 +10,9 @@ use thiserror::Error;
 use crate::io::IoError;
 use crate::paths::DbPaths;
 use crate::serialization::SerializationError;
-use crate::types::{BlobHash, CheckpointState, TypesError, WalOp};
+use crate::types::{BlobHash, CheckpointReason, CheckpointState, TypesError, WalOp};
 use crate::{KeyBytes, calculate_blob_hash};
 
-mod checkpoint;
 mod replay;
 mod storage;
 
@@ -108,10 +106,8 @@ pub enum WalReplayIoStep {
 pub(crate) struct WalManager {
     num_ops_per_wal: u64,
     next_op_version: u64,
-    last_checkpointed_segment_id: CheckpointState,
 
     storage: SegmentStorage,
-    checkpoint_persister: CheckpointPersister,
 
     active_writer: Option<SegmentWriter>,
 }
@@ -125,30 +121,70 @@ impl WalManager {
         })?;
 
         let storage = SegmentStorage::new(paths.clone());
-        let checkpoint_persister = CheckpointPersister::new(&paths);
-        Ok(WalManager {
-            num_ops_per_wal,
-            next_op_version: 1,
-            last_checkpointed_segment_id: None,
-            storage,
-            checkpoint_persister,
-            active_writer: None,
-        })
+        Ok(WalManager { num_ops_per_wal, next_op_version: 1, storage, active_writer: None })
     }
 
-    pub(crate) fn load_checkpoint_metadata(&mut self) -> Result<(), WalError> {
-        self.last_checkpointed_segment_id = self.checkpoint_persister.load()?;
-        Ok(())
+    /// Decide the checkpoint target version for the given reason without performing any IO.
+    /// Returns `Some(version)` when a checkpoint should be performed and `None` when it should be
+    /// skipped. The returned version is the highest written op version (i.e., `next_op_version -
+    /// 1`).
+    pub(crate) fn compute_checkpoint_target(
+        &self,
+        reason: CheckpointReason,
+        last_checkpointed_version: CheckpointState,
+    ) -> Option<u64> {
+        let should_checkpoint = match reason {
+            CheckpointReason::InitialSetup => {
+                // Only checkpoint on initial setup if no checkpoint exists
+                last_checkpointed_version.is_none()
+            }
+            CheckpointReason::AfterReplay | CheckpointReason::Explicit => true,
+            CheckpointReason::SegmentRollover => {
+                // Checkpoint on segment rollover if we have new operations since the last
+                // checkpoint
+                match last_checkpointed_version {
+                    Some(last_checkpoint) => self.next_op_version > last_checkpoint + 1,
+                    None => {
+                        // No checkpoint exists yet - only checkpoint if we've written data
+                        self.next_op_version > 1
+                    }
+                }
+            }
+        };
+
+        if !should_checkpoint {
+            return None;
+        }
+
+        // target the last written op
+        Some(self.next_op_version.saturating_sub(1))
     }
 
-    pub(crate) fn set_and_persist_checkpoint_marker(
+    /// Prune stale segments for the provided checkpoint version.
+    /// Idempotent: if `version` is less than or equal to the last checkpointed version, this is a
+    /// no-op.
+    pub(crate) fn commit_checkpoint(
         &mut self,
-        segment_id: u64,
+        version: u64,
+        last_checkpointed_version: CheckpointState,
     ) -> Result<(), WalError> {
-        // persist the new checkpoint marker
-        self.checkpoint_persister.save(segment_id)?;
-        // update internal state only after successful file write
-        self.last_checkpointed_segment_id = Some(segment_id);
+        // Do not go backwards; allow equal (idempotent).
+        if let Some(last) = last_checkpointed_version {
+            if version <= last {
+                tracing::debug!(
+                    last_checkpointed_version = last,
+                    commit_version = version,
+                    "Skipping checkpoint commit (idempotent/no-op).",
+                );
+                return Ok(());
+            }
+        }
+
+        // Prune segments where all operations have version <= checkpoint_version
+        let last_checkpointed_segment = self.segment_id_for_op_version(version);
+        let _ = self.storage.prune_stale_segments(last_checkpointed_segment);
+
+        tracing::info!(checkpoint_version = version, "Checkpoint committed");
         Ok(())
     }
 
@@ -166,16 +202,13 @@ impl WalManager {
 
     pub(crate) fn replay_and_prepare<K>(
         &mut self,
+        last_checkpointed_version: CheckpointState,
         apply_op_fn: impl FnMut(WalOp<K>),
     ) -> Result<(), WalError>
     where
         K: KeyBytes + Clone + Eq + Ord + std::fmt::Debug + 'static,
     {
-        let replayer = WalReplayer::new(
-            &self.storage,
-            self.last_checkpointed_segment_id,
-            self.num_ops_per_wal,
-        );
+        let replayer = WalReplayer::new(&self.storage, last_checkpointed_version);
 
         let highest_op_version = replayer.replay(apply_op_fn)?;
         self.next_op_version = highest_op_version + 1;
@@ -206,25 +239,6 @@ impl WalManager {
         writer.write_entry(version, op_hash, op_data)?;
 
         Ok(WalAppendInfo { version, op_hash })
-    }
-
-    pub(crate) fn perform_checkpoint(
-        &mut self,
-        should_seal_current_segment: bool,
-    ) -> Result<u64, WalError> {
-        let checkpoint_segment_id = self.get_segment_id_for_previous_op();
-
-        if should_seal_current_segment {
-            if let Some(writer) = self.active_writer.take() {
-                // checkpointing with sealing also finalizes the segment.
-                writer.seal()?;
-            }
-        }
-
-        self.set_and_persist_checkpoint_marker(checkpoint_segment_id)?;
-        let _ = self.storage.prune_stale_segments(checkpoint_segment_id);
-
-        Ok(checkpoint_segment_id)
     }
 
     /// get the segment ID for the operation that would be placed at the previous operation version

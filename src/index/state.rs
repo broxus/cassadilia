@@ -17,6 +17,7 @@ pub enum IndexStateError {
 pub(crate) struct IndexState<K> {
     pub(crate) key_to_hash: BTreeMap<K, IndexStateItem>,
     pub(crate) hash_to_ref_count: HashMap<BlobHash, u32>,
+    pub(crate) last_persisted_version: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,7 +31,11 @@ where
     K: Clone + Eq + Ord,
 {
     pub fn new() -> Self {
-        IndexState { key_to_hash: BTreeMap::new(), hash_to_ref_count: HashMap::default() }
+        IndexState {
+            key_to_hash: BTreeMap::new(),
+            hash_to_ref_count: HashMap::default(),
+            last_persisted_version: None,
+        }
     }
 
     pub fn apply_logical_op(&mut self, op: &WalOp<K>) -> Result<Vec<BlobHash>, IndexStateError> {

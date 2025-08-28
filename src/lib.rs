@@ -347,10 +347,11 @@ where
 
     pub fn remove(&self, key: &K) -> Result<bool, LibError> {
         if self.index.read_state().contains_key(key) {
-            let op = WalOp::Remove { keys: vec![key.clone()] };
-            let to_delete = self.index.apply_remove_op(&op).map_err(LibError::Index)?;
-            let _deleted_hashes =
-                self.cas_manager.delete_blobs(&to_delete).map_err(LibError::Cas)?;
+            let delete_fn = |hashes: &[BlobHash]| -> Result<(), CasManagerError> {
+                self.cas_manager.delete_blobs(hashes).map(|_| ())
+            };
+
+            self.index.apply_remove_op(vec![key.clone()], &delete_fn).map_err(LibError::Index)?;
             Ok(true)
         } else {
             Ok(false)
@@ -374,15 +375,17 @@ where
 
         tracing::debug!("Removing {} keys in range {:?}", keys_to_remove_count, range);
 
-        let op = WalOp::Remove { keys: keys_to_remove };
-        let to_delete = self.index.apply_remove_op(&op).map_err(LibError::Index)?;
-        let _deleted_hashes = self.cas_manager.delete_blobs(&to_delete).map_err(LibError::Cas)?;
+        let delete_fn = |hashes: &[BlobHash]| -> Result<(), CasManagerError> {
+            self.cas_manager.delete_blobs(hashes).map(|_| ())
+        };
+
+        self.index.apply_remove_op(keys_to_remove, &delete_fn).map_err(LibError::Index)?;
 
         Ok(keys_to_remove_count)
     }
 
     pub fn checkpoint(&self) -> Result<(), LibError> {
-        self.index.checkpoint(true).map_err(LibError::Index)
+        self.index.checkpoint(CheckpointReason::Explicit).map_err(LibError::Index)
     }
 
     fn with_blob_item<T, F>(&self, key: &K, f: F) -> Result<Option<T>, LibError>

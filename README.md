@@ -47,25 +47,21 @@ updates or blob content writes.
 
 ### 2. Intent Tracking System
 
-To prevent race conditions between concurrent commits and deletions, Cassadilia
-uses an intent tracking system / 2-phase commit protocol:
+We use scoped intents to prevent races between concurrent puts and
+deletes.
 
-1. **Before committing a blob to CAS**, a transaction registers its intent with
-   the index:
-    - Increments the blob's reference count immediately
-    - Tracks the pending intent in the index
+- Register intent: record `key -> blob_hash` in `pending_intents` map; no
+  refcount changes.
+- Commit: append WAL Put, apply it to the index updating refcounts, remove the
+  intent, compute unreferenced blobs, exclude hashes still referenced by active
+  intents, delete the rest.
+- Drop without commit: remove the current intent and restore any previously
+  replaced intent; no refcount changes.
+- Remove ops: append WAL Remove, apply to state, filter unreferenced blobs
+  against active intents, delete before doing checkpoint.
 
-2. **When the blob is moved in CAS**, the transaction:
-    - Writes to the WAL
-    - Updates the index state
-    - Removes the intent
-
-3. **During deletion**, the system checks both:
-    - Committed reference counts in the index
-    - Pending intents that haven't been committed yet
-
-This prevents the race where Thread A could delete a blob that Thread B is in
-the process of committing.
+Intents are in-memory only; if a process exits before commit, any staged files
+become orphans, handled by startup orphan scanning.
 
 ## Todo
 

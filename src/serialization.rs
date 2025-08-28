@@ -25,9 +25,16 @@ pub enum SerializationError {
 }
 
 /// serialize `BTreeMap`<Vec<u8>, `IndexStateItem`> using hand-rolled format
-/// format: [u32 `num_entries`][[u32 `key_len`][key_bytes][`32_bytes_hash`]]...
-pub(crate) fn serialize_index_state<K: KeyBytes>(map: &BTreeMap<K, IndexStateItem>) -> Vec<u8> {
+/// format: [u64 `last_persisted_version`][u32 `num_entries`][[u32 `key_len`][key_bytes][`32_bytes_hash`][u64 `blob_size`]]...
+pub(crate) fn serialize_index_state<K: KeyBytes>(
+    map: &BTreeMap<K, IndexStateItem>,
+    last_persisted_version: Option<u64>,
+) -> Vec<u8> {
     let mut result = Vec::new();
+
+    // write last_persisted_version (0 means None)
+    let version = last_persisted_version.unwrap_or(0);
+    result.extend_from_slice(&version.to_le_bytes());
 
     // write number of entries
     let num_entries = map.len() as u32;
@@ -56,10 +63,16 @@ pub(crate) fn serialize_index_state<K: KeyBytes>(map: &BTreeMap<K, IndexStateIte
 }
 
 /// deserialize `BTreeMap`<Vec<u8>, `IndexStateItem`> using hand-rolled format
+pub(crate) type DecodedIndexState = (BTreeMap<Vec<u8>, IndexStateItem>, Option<u64>);
+
 pub(crate) fn deserialize_index_state(
     bytes: &[u8],
-) -> Result<BTreeMap<Vec<u8>, IndexStateItem>, SerializationError> {
+) -> Result<DecodedIndexState, SerializationError> {
     let mut bytes = bytes;
+
+    // read last_persisted_version
+    let version = read_u64(&mut bytes, "IndexState version")?;
+    let last_persisted_version = if version == 0 { None } else { Some(version) };
 
     // read number of entries
     let num_entries = read_u32(&mut bytes, "BTreeMap header")?;
@@ -81,7 +94,7 @@ pub(crate) fn deserialize_index_state(
         map.insert(key, IndexStateItem { blob_hash: hash, blob_size: size });
     }
 
-    Ok(map)
+    Ok((map, last_persisted_version))
 }
 
 /// serialize `WalOpRaw` using hand-rolled format
@@ -257,9 +270,8 @@ mod tests {
     where
         K: KeyBytes + Ord,
     {
-        deserialize_index_state(&data)
-            .unwrap()
-            .into_iter()
+        let (map, _last_version) = deserialize_index_state(&data).unwrap();
+        map.into_iter()
             .map(|(key, value)| (K::from_key_bytes(&key).unwrap(), value))
             .collect()
     }
@@ -267,7 +279,7 @@ mod tests {
     #[test]
     fn test_btreemap_serialization_empty() {
         let map: BTreeMap<[u8; 0], IndexStateItem> = BTreeMap::new();
-        let serialized = serialize_index_state(&map);
+        let serialized = serialize_index_state(&map, None);
         let deserialized = deserialize_and_parse_index_state(serialized);
         assert_eq!(map, deserialized);
     }
@@ -276,7 +288,7 @@ mod tests {
     fn test_btreemap_serialization_single_empty_key() {
         let mut map = BTreeMap::new();
         map.insert([], make_test_item(1));
-        let serialized = serialize_index_state(&map);
+        let serialized = serialize_index_state(&map, None);
         let deserialized = deserialize_and_parse_index_state(serialized);
         assert_eq!(map, deserialized);
     }
@@ -289,9 +301,35 @@ mod tests {
         map.insert(vec![255; 1000], make_test_item(3)); // large key
         map.insert(vec![0], make_test_item(4)); // single byte key
 
-        let serialized = serialize_index_state(&map);
+        let serialized = serialize_index_state(&map, None);
         let deserialized = deserialize_and_parse_index_state(serialized);
         assert_eq!(map, deserialized);
+    }
+
+    #[test]
+    fn test_btreemap_serialization_last_version_none() {
+        let mut map: BTreeMap<Vec<u8>, IndexStateItem> = BTreeMap::new();
+        map.insert(b"k1".to_vec(), make_test_item(7));
+        map.insert(b"k2".to_vec(), make_test_item(8));
+
+        let serialized = serialize_index_state(&map, None);
+        let (decoded_map, last_version) = deserialize_index_state(&serialized).unwrap();
+
+        assert_eq!(last_version, None);
+        assert_eq!(map, decoded_map);
+    }
+
+    #[test]
+    fn test_btreemap_serialization_last_version_some() {
+        let mut map: BTreeMap<Vec<u8>, IndexStateItem> = BTreeMap::new();
+        map.insert(b"k1".to_vec(), make_test_item(21));
+
+        let expected_version = Some(123_456_789u64);
+        let serialized = serialize_index_state(&map, expected_version);
+        let (decoded_map, last_version) = deserialize_index_state(&serialized).unwrap();
+
+        assert_eq!(last_version, expected_version);
+        assert_eq!(map, decoded_map);
     }
 
     #[test]

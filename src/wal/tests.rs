@@ -4,9 +4,30 @@ use std::io::Write;
 use tempfile::tempdir;
 
 use super::*;
+
+fn perform_checkpoint(
+    wal: &mut WalManager,
+    reason: CheckpointReason,
+    seal_current_segment: bool,
+    last_checkpointed_version: CheckpointState,
+) -> Result<Option<u64>, WalError> {
+    let target = wal.compute_checkpoint_target(reason, last_checkpointed_version);
+    let Some(version) = target else {
+        return Ok(None);
+    };
+
+    if seal_current_segment {
+        if let Some(writer) = wal.active_writer.take() {
+            writer.seal()?;
+        }
+    }
+
+    wal.commit_checkpoint(version, last_checkpointed_version)?;
+    Ok(Some(version))
+}
 use crate::paths::DbPaths;
 use crate::serialization::serialize_wal_op_raw;
-use crate::types::{BlobHash, WalOpRaw};
+use crate::types::{BlobHash, CheckpointReason, WalOpRaw};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TestKey(pub u64);
@@ -84,7 +105,7 @@ fn append_op_fails_when_segment_rollover_cannot_create_file() {
         // The error occurs when trying to open the new segment file for writing.
         assert!(
             matches!(result, Err(WalError::Io { operation: WalIoOperation::OpenSegmentWrite, .. })),
-            "Expected an OpenSegmentWrite I/O error, but got {result:?}",
+            "want OpenSegmentWrite, got {result:?}",
         );
 
         // Cleanup: Restore permissions so the tempdir can be deleted.
@@ -105,10 +126,10 @@ fn checkpoint_succeeds_and_prunes_old_segments() {
     let checkpoint_segment_id = wal_manager.get_segment_id_for_previous_op();
     assert_eq!(checkpoint_segment_id, 2);
 
-    // Perform the checkpoint, which should succeed and remove segments older than 2.
-    let result = wal_manager.perform_checkpoint(false);
+    // Checkpoint; prune segments < 2
+    let result = perform_checkpoint(&mut wal_manager, CheckpointReason::Explicit, false, None);
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), 2);
+    assert_eq!(result.unwrap(), Some(5)); // Returns checkpoint version (5), not segment ID
 
     // Verify segments 0 and 1 are gone, but segment 2 remains.
     let segments = wal_manager.storage.discover_segments().unwrap();
@@ -118,9 +139,7 @@ fn checkpoint_succeeds_and_prunes_old_segments() {
 
 #[test]
 fn wal_manager_drop_is_safe_with_active_writer() {
-    // This test simply verifies that drop doesn't panic when there's an active
-    // writer that needs to be closed. Error handling within drop is hard to test,
-    // but we can ensure it completes without crashing.
+    // Drop shouldn't panic with an active writer.
     {
         let (mut wal_manager, _dir) = setup_wal_manager(5);
         wal_manager.append_op(b"some data").unwrap();
@@ -142,7 +161,7 @@ fn replay_fails_on_key_decode_error() {
     wal_manager.active_writer.take().unwrap().close().unwrap();
 
     // Replay with an encoder that is guaranteed to fail decoding.
-    let result = wal_manager.replay_and_prepare::<TestKey>(|_| {});
+    let result = wal_manager.replay_and_prepare::<TestKey>(None, |_| {});
 
     assert!(matches!(result, Err(WalError::ReplayConvertWalOp { .. })));
 }
@@ -173,12 +192,12 @@ fn replay_fails_on_corrupted_op_entry() {
     file.sync_all().unwrap();
     drop(file);
 
-    // Replay should fail with an I/O error when trying to read past the end of the file.
-    let result = wal_manager.replay_and_prepare::<TestKey>(|_| {});
+    // Replay fails on short read (past EOF)
+    let result = wal_manager.replay_and_prepare::<TestKey>(None, |_| {});
 
     assert!(
         matches!(result, Err(WalError::ReplayIo { step: WalReplayIoStep::ReadOpData, .. })),
-        "Expected a ReplayIo::ReadOpData error, but got {result:?}",
+        "want ReadOpData, got {result:?}",
     );
 }
 
@@ -189,8 +208,9 @@ fn replay_should_ignore_segments_before_checkpoint() {
     // Append ops to create segments 0 and 1.
     append_ops(&mut wal_manager, 4); // v1,2 in seg 0; v3,4 in seg 1
 
-    // Checkpoint after segment 1 is complete. This should prune segment 0.
-    wal_manager.perform_checkpoint(false).unwrap();
+    // Checkpoint after seg 1; prunes seg 0
+    let checkpoint_version = perform_checkpoint(&mut wal_manager, CheckpointReason::Explicit, false, None).unwrap();
+    assert_eq!(checkpoint_version, Some(4)); // Checkpoint at version 4
 
     // Append more ops to create segment 2.
     append_ops(&mut wal_manager, 2); // v5,6 in seg 2
@@ -198,25 +218,18 @@ fn replay_should_ignore_segments_before_checkpoint() {
     // Simulate a restart
     let paths = DbPaths::new(dir.path().to_path_buf());
     let mut new_wal_manager = WalManager::new(paths, 2).unwrap();
-    new_wal_manager.load_checkpoint_metadata().unwrap();
 
     let mut replayed_ops_count = 0;
-    let result = new_wal_manager.replay_and_prepare::<TestKey>(|_| {
+    let result = new_wal_manager.replay_and_prepare::<TestKey>(Some(4), |_op| {
         replayed_ops_count += 1;
+        tracing::debug!("Replaying op #{}", replayed_ops_count);
     });
     assert!(result.is_ok());
 
-    // CORRECT BEHAVIOR: Replay must include the checkpointed segment itself to
-    // recover any ops that occurred after the last index persistence.
-    // Checkpoint is at segment 1. Segments on disk are 1 and 2.
-    // Segment 1 has 2 ops (v3, v4). Segment 2 has 2 ops (v5, v6).
-    // Therefore, 4 ops should be replayed.
-    assert_eq!(
-        replayed_ops_count, 4,
-        "Replay must include the checkpointed segment and all subsequent segments"
-    );
+    // Replay ops after checkpoint version only (checkpoint=4)
+    assert_eq!(replayed_ops_count, 2, "replayed wrong count");
 
-    // The next version should be 7, following the last replayed op (v6).
+    // Next version = 7 (after v6)
     assert_eq!(new_wal_manager.get_next_op_version(), 7);
 }
 #[test]
@@ -224,57 +237,15 @@ fn replay_on_completely_empty_directory() {
     let (mut wal_manager, _dir) = setup_wal_manager(5);
 
     // Immediately call replay on the empty directory.
-    wal_manager.load_checkpoint_metadata().unwrap();
 
     let mut replayed_ops = Vec::new();
-    let result = wal_manager.replay_and_prepare::<TestKey>(|op| {
+    let result = wal_manager.replay_and_prepare::<TestKey>(None, |op| {
         replayed_ops.push(op);
     });
 
     assert!(result.is_ok());
     assert_eq!(replayed_ops.len(), 0);
     assert_eq!(wal_manager.get_next_op_version(), 1);
-}
-
-// --- CheckpointPersister Tests ---
-
-#[test]
-fn checkpoint_load_fails_on_parse_error() {
-    let dir = tempdir().unwrap();
-    let paths = DbPaths::new(dir.path().to_path_buf());
-    std::fs::write(paths.checkpoint_meta_path(), "not-a-number").unwrap();
-
-    let persister = CheckpointPersister::new(&paths);
-    let result = persister.load();
-
-    assert!(matches!(result, Err(WalError::ParseCheckpointMetaSegmentId(_))));
-}
-
-#[test]
-fn checkpoint_load_fails_on_read_io_error() {
-    let dir = tempdir().unwrap();
-    let paths = DbPaths::new(dir.path().to_path_buf());
-
-    // Create the checkpoint file.
-    let checkpoint_path = paths.checkpoint_meta_path();
-    std::fs::write(checkpoint_path, "123").unwrap();
-
-    // Make it unreadable to trigger a read error.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(checkpoint_path).unwrap().permissions();
-        perms.set_mode(0o000); // No permissions.
-        std::fs::set_permissions(checkpoint_path, perms).unwrap();
-
-        let persister = CheckpointPersister::new(&paths);
-        let result = persister.load();
-
-        assert!(matches!(
-            result,
-            Err(WalError::Io { operation: WalIoOperation::ReadCheckpointMeta, .. })
-        ));
-    }
 }
 
 // --- SegmentStorage and Calculation Tests ---
@@ -364,14 +335,11 @@ fn segment_reader_stops_at_explicit_sentinel() {
     // Now, open a reader for the same segment.
     let mut reader = wal_manager.storage.open_reader(segment_id).unwrap();
 
-    // We should be able to read exactly 3 entries.
+    // Expect exactly 3 entries
     assert!(reader.next().is_some()); // Entry 1
     assert!(reader.next().is_some()); // Entry 2
     assert!(reader.next().is_some()); // Entry 3
 
     // The next call should return None because it hits the sentinel.
-    assert!(
-        reader.next().is_none(),
-        "Reader should stop after the last valid entry by hitting the sentinel"
-    );
+    assert!(reader.next().is_none(), "didn't stop at sentinel");
 }

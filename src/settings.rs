@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::io::atomically_write_file_bytes;
 
-pub const CURRENT_DB_VERSION: u32 = 1;
+pub const CURRENT_DB_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub(crate) struct DbSettings {
@@ -47,8 +47,7 @@ impl SettingsPersister {
                 let settings: DbSettings =
                     serde_json::from_str(&content).map_err(SettingsError::ParseFailed)?;
 
-                // TODO: Add a proper migration stuff.
-                if settings.version > CURRENT_DB_VERSION {
+                if settings.version != CURRENT_DB_VERSION {
                     return Err(SettingsError::UnsupportedVersion {
                         found: settings.version,
                         expected: CURRENT_DB_VERSION,
@@ -107,26 +106,17 @@ mod tests {
 
             // Count all directories (including intermediate ones)
             let total_dir_count = count_directories_recursive(&cas_root)?;
-            assert_eq!(
-                total_dir_count, 65792,
-                "Should have created 256 + 65,536 = 65,792 directories total"
-            );
+            assert_eq!(total_dir_count, 65792, "want 65,792 total dirs");
 
             // Count only leaf directories (where blobs will be stored)
             let leaf_dir_count = count_leaf_directories(&cas_root)?;
-            assert_eq!(
-                leaf_dir_count, 65536,
-                "Should have exactly 65,536 leaf directories for blob storage"
-            );
+            assert_eq!(leaf_dir_count, 65536, "want 65,536 leaf dirs");
 
-            // Verify the structure: should be 2 levels deep with 256 dirs at each level
+            // Verify structure: 2 levels, 256 each
             let structure = analyze_directory_structure(&cas_root)?;
-            assert_eq!(structure.depth, 2, "Directory structure should be 2 levels deep");
-            assert_eq!(structure.dirs_per_level[0], 256, "Should have 256 top-level directories");
-            assert_eq!(
-                structure.dirs_per_level[1], 65536,
-                "Should have 65,536 second-level directories"
-            );
+            assert_eq!(structure.depth, 2, "depth != 2");
+            assert_eq!(structure.dirs_per_level[0], 256, "need 256 top-level");
+            assert_eq!(structure.dirs_per_level[1], 65536, "need 65,536 second-level");
 
             // Write a blob to verify it works
             let mut tx = cas.put("test_key".to_string())?;
@@ -241,6 +231,32 @@ mod tests {
             result,
             Err(SettingsError::UnsupportedVersion { found, expected })
                 if found == CURRENT_DB_VERSION + 1 && expected == CURRENT_DB_VERSION
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_past_version_rejected() -> Result<()> {
+        let dir = tempdir()?;
+        let settings_path = dir.path().join("db_settings.json");
+
+        // Write a settings file with past version
+        let past_version = CURRENT_DB_VERSION.saturating_sub(1);
+        let content = format!(
+            r#"{{"version":{},"dir_tree_is_pre_created":false,"num_ops_per_wal":1000}}"#,
+            past_version
+        );
+        std::fs::write(&settings_path, content)?;
+
+        // Load should fail with UnsupportedVersion error
+        let persister = SettingsPersister::new(settings_path);
+        let result = persister.load();
+
+        assert!(matches!(
+            result,
+            Err(SettingsError::UnsupportedVersion { found, expected })
+                if found == past_version && expected == CURRENT_DB_VERSION
         ));
 
         Ok(())

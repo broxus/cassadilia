@@ -27,13 +27,11 @@ impl<'a> IndexStatePersister<'a> {
         match std::fs::read(index_path) {
             Ok(data) => {
                 if data.is_empty() {
-                    tracing::info!(
-                        "Index file '{}' is empty, starting fresh. State remains new.",
-                        index_path.display()
-                    );
-                    return Ok(state);
+                    return Err(PersisterError::EmptyIndexFile);
                 }
-                let loaded_key_bytes_to_hash = deserialize_index_state(&data)?;
+                let (loaded_key_bytes_to_hash, last_persisted_version) =
+                    deserialize_index_state(&data)?;
+                state.last_persisted_version = last_persisted_version;
 
                 state.key_to_hash.clear();
                 state.hash_to_ref_count.clear();
@@ -71,7 +69,7 @@ impl<'a> IndexStatePersister<'a> {
         let index_path = self.paths.index_file_path();
         let index_tmp_path = self.paths.index_tmp_path();
 
-        let data_bytes = serialize_index_state(&state.key_to_hash);
+        let data_bytes = serialize_index_state(&state.key_to_hash, state.last_persisted_version);
 
         atomically_write_file_bytes(index_path, index_tmp_path, &data_bytes)?;
 
@@ -94,4 +92,6 @@ pub enum PersisterError {
     DecodeKey,
     #[error("Persister: Failed to atomically write index state")]
     AtomicWrite(#[from] IoError),
+    #[error("Index file is empty")]
+    EmptyIndexFile,
 }

@@ -13,14 +13,11 @@ use thiserror::Error;
 
 pub use self::state::IndexStateItem;
 use crate::paths::DbPaths;
-use crate::serialization::serialize_wal_op_raw;
-use crate::types::{BlobHash, Config, KeyBytes, WalOp};
-use crate::wal::{WalAppendInfo, WalError, WalManager};
+use crate::types::{BlobHash, CheckpointReason, Config, KeyBytes, WalOp};
+use crate::wal::{WalError, WalManager};
 
 mod persistence;
 mod state;
-
-pub(crate) const CHECKPOINT_META_FILENAME: &str = "checkpoint.meta";
 
 #[derive(Debug)]
 pub enum IndexIoOperation {
@@ -61,6 +58,14 @@ pub enum IndexError {
     ApplyWalOpSerialize(#[source] crate::serialization::SerializationError),
     #[error("ApplyWalOp: Failed to write WAL entry")]
     ApplyWalOpWriteEntry(#[source] WalError),
+    #[error("Failed to serialize WalOp")]
+    SerializeWalOp(#[source] crate::serialization::SerializationError),
+
+    #[error("Failed to delete unreferenced blobs")]
+    BlobDeletion {
+        #[source]
+        source: crate::cas_manager::CasManagerError,
+    },
 
     #[error("Refcount integrity issue")]
     RefcountIntegrity {
@@ -93,12 +98,13 @@ where
     K: KeyBytes + Clone + Eq + Ord + std::hash::Hash + Debug + Send + Sync + 'static,
 {
     /// Commit the intent by applying the WAL operation and removing the intent.
-    /// Returns a list of blob hashes that are no longer referenced.
-    pub(crate) fn commit(mut self) -> Result<Vec<BlobHash>, IndexError> {
-        let op = WalOp::Put { key: self.key.clone(), hash: self.hash, size: self.size };
-        let result = self.index.apply_put_op(&op, &self.key)?;
+    pub(crate) fn commit(
+        mut self,
+        delete_fn: &crate::types::DeleteBlobCallFn,
+    ) -> Result<(), IndexError> {
+        self.index.apply_put_op(self.key.clone(), self.hash, self.size, delete_fn)?;
         self.committed = true;
-        Ok(result)
+        Ok(())
     }
 }
 
@@ -108,13 +114,8 @@ where
 {
     fn drop(&mut self) {
         if !self.committed {
-            //  Revert
-            // 1. Remove our intent from pending_intents
-            // 2. Decrement ref count for our hash
-            // 3. If we replaced an existing intent, restore it
-
+            // Revert: Remove our intent from pending_intents
             let mut intents = self.index.pending_intents.lock();
-            let mut state = self.index.state.write();
 
             if let Some(current_hash) = intents.get(&self.key) {
                 if *current_hash == self.hash {
@@ -123,13 +124,6 @@ where
                     // If we had replaced an existing intent, restore it
                     if let Some(replaced_hash) = self.replaced_hash {
                         intents.insert(self.key.clone(), replaced_hash);
-                    }
-                    // Decrement ref count for our hash
-                    let _ = state.decrement_ref(&self.hash); // Ignore errors in drop
-
-                    // If we restored a replaced intent, increment its ref count
-                    if let Some(replaced_hash) = self.replaced_hash {
-                        state.increment_ref(&replaced_hash);
                     }
                 }
             }
@@ -154,12 +148,15 @@ where
         let mut wal_manager = WalManager::new(paths.clone(), config.num_ops_per_wal)
             .map_err(IndexError::InitCreateWalManager)?;
 
-        wal_manager.load_checkpoint_metadata()?;
-
         let persister = IndexStatePersister::new(&paths);
         let state = persister.load()?;
+
+        let checkpoint_version = state.last_persisted_version;
         let state = Arc::new(RwLock::new(state));
-        wal_manager.replay_and_prepare(|op| {
+
+        let mut replayed_count = 0u64;
+        wal_manager.replay_and_prepare(checkpoint_version, |op| {
+            replayed_count += 1;
             let _ = state.write().apply_logical_op(&op).expect("Index is corrupted");
         })?;
 
@@ -170,7 +167,10 @@ where
             pending_intents: Mutex::new(HashMap::default()),
         };
 
-        index.checkpoint(false)?; // Don't seal segment on startup
+        // Only checkpoint after replay if we actually replayed something
+        if replayed_count > 0 {
+            index.checkpoint(CheckpointReason::AfterReplay)?;
+        }
 
         Ok(index)
     }
@@ -179,54 +179,43 @@ where
         IndexReadGuard { inner: self.state.read() }
     }
 
-    pub fn apply_wal_op_unsafe(&self, logical_op: &WalOp<K>) -> Result<Vec<BlobHash>, IndexError> {
-        let op_data =
-            serialize_wal_op_raw(&logical_op.to_raw()).map_err(IndexError::ApplyWalOpSerialize)?;
+    pub fn checkpoint(&self, reason: CheckpointReason) -> Result<(), IndexError> {
+        tracing::info!(?reason, "Starting checkpoint operation.");
 
-        let WalAppendInfo { version, .. } = {
-            let mut wal_guard = self.wal.lock();
-            wal_guard.append_op(&op_data)?
-        };
+        let mut snapshot = self.state.write();
+        let mut wal_guard = self.wal.lock();
 
-        tracing::trace!(version, ?logical_op, "Logged WAL op, applying to state");
-
-        // Apply to in-memory state.
-        let mut state_guard = self.state.write();
-        let unreferenced_hashes =
-            state_guard.apply_logical_op(logical_op).expect("Index is corrupted");
-        Ok(unreferenced_hashes)
+        self.checkpoint_inner(reason, &mut wal_guard, &mut *snapshot)
     }
 
-    pub fn checkpoint(&self, seal_segment: bool) -> Result<(), IndexError> {
-        tracing::info!("Starting checkpoint operation.");
-
-        {
-            let mut wal_guard = self.wal.lock();
-            wal_guard.perform_checkpoint(seal_segment)?;
-        }
-        {
-            let intents_guard = self.pending_intents.lock();
-            let state_guard = self.state.read();
-
-            // Clone the state and adjust ref counts for pending intents
-            let mut snapshot = (*state_guard).clone();
-            for (_, hash) in intents_guard.iter() {
-                // Decrement ref count in the snapshot (not the actual state)
-                // This ensures we persist the "committed" state without inflated intent counts
-                if let Some(count) = snapshot.hash_to_ref_count.get_mut(hash) {
-                    if *count > 0 {
-                        *count -= 1;
-                        if *count == 0 {
-                            snapshot.hash_to_ref_count.remove(hash);
-                        }
-                    }
+    fn checkpoint_inner(
+        &self,
+        checkpoint_reason: CheckpointReason,
+        wal_guard: &mut WalManager,
+        snapshot: &mut IndexState<K>,
+    ) -> Result<(), IndexError> {
+        tracing::info!(?checkpoint_reason, "Starting checkpoint operation.");
+        // 1. Compute the target
+        let current_checkpoint = snapshot.last_persisted_version;
+        let target_version =
+            match wal_guard.compute_checkpoint_target(checkpoint_reason, current_checkpoint) {
+                Some(v) => v,
+                None => {
+                    tracing::debug!(?checkpoint_reason, "Checkpoint was skipped");
+                    return Ok(());
                 }
-            }
+            };
 
-            IndexStatePersister::new(&self.paths).save(&snapshot)?;
-        }
+        // 2. Set the version we're about to persist
+        snapshot.last_persisted_version = Some(target_version);
 
-        tracing::info!("Checkpoint completed successfully.");
+        IndexStatePersister::new(&self.paths).save(snapshot)?;
+        // 3. Prune segments up to the target
+        wal_guard
+            .commit_checkpoint(target_version, current_checkpoint)
+            .map_err(IndexError::ApplyWalOpWriteEntry)?;
+        tracing::info!(checkpoint_version = target_version, "Checkpoint completed successfully.");
+
         Ok(())
     }
 
@@ -236,20 +225,9 @@ where
         meta: IntentMeta,
     ) -> Result<IntentGuard<'_, K>, IndexError> {
         let mut intents = self.pending_intents.lock();
-        let mut state = self.state.write();
 
-        // Check if there was a previous intent for this key and decrement its ref count
-        let replaced_hash = if let Some(old_hash) = intents.get(&key) {
-            state
-                .decrement_ref(old_hash)
-                .map_err(|e| IndexError::RefcountIntegrity { source: e })?;
-            Some(*old_hash)
-        } else {
-            None
-        };
-
-        // Increment ref count for the new hash
-        state.increment_ref(&meta.blob_hash);
+        // Check if there was a previous intent for this key
+        let replaced_hash = intents.get(&key).copied();
 
         // Insert the new intent
         intents.insert(key.clone(), meta.blob_hash);
@@ -264,38 +242,89 @@ where
         })
     }
 
-    pub fn apply_put_op(
-        &self,
+    fn apply_wal_op_unsafe(
+        state: &mut IndexState<K>,
+        wal: &mut WalManager,
         logical_op: &WalOp<K>,
-        key: &K,
-    ) -> Result<Vec<BlobHash>, IndexError> {
-        // Atomically apply WAL operation and remove intent to prevent
-        // other threads from seeing committed state while intent exists
-        let mut intents = self.pending_intents.lock();
+    ) -> Result<(Vec<BlobHash>, crate::wal::WalAppendInfo, bool), IndexError> {
+        let pre_append_segment_id = wal.get_segment_id_for_previous_op();
 
-        let mut unreferenced_from_op = self.apply_wal_op_unsafe(logical_op)?;
+        let serialized = crate::serialization::serialize_wal_op_raw(&logical_op.to_raw())
+            .map_err(IndexError::SerializeWalOp)?;
+        let append_info = wal.append_op(&serialized)?;
 
-        intents.remove(key);
+        let unreferenced = state.apply_logical_op(logical_op).expect("Index is corrupted");
 
-        // Prevent deletion of blobs still referenced by pending intents
-        unreferenced_from_op
-            .retain(|hash| !intents.values().any(|intent_hash| intent_hash == hash));
+        let post_append_segment_id = wal.segment_id_for_op_version(append_info.version);
+        let rolled_over = pre_append_segment_id != post_append_segment_id;
 
-        Ok(unreferenced_from_op)
+        Ok((unreferenced, append_info, rolled_over))
     }
 
-    pub fn apply_remove_op(&self, logical_op: &WalOp<K>) -> Result<Vec<BlobHash>, IndexError> {
-        // Take intent lock before applying remove to prevent deletion
-        // of blobs that have pending put operations
-        let intents = self.pending_intents.lock();
+    pub fn apply_put_op(
+        &self,
+        key: K,
+        hash: BlobHash,
+        size: u64,
+        delete_fn: &crate::types::DeleteBlobCallFn,
+    ) -> Result<(), IndexError> {
+        let logical_op = WalOp::Put { key: key.clone(), hash, size };
+        let mut intents = self.pending_intents.lock();
+        let mut state = self.state.write();
+        let mut wal = self.wal.lock();
 
-        let mut unreferenced_from_op = self.apply_wal_op_unsafe(logical_op)?;
+        let (mut unreferenced_from_op, _append_info, rolled_over) =
+            Self::apply_wal_op_unsafe(&mut state, &mut wal, &logical_op)?;
 
-        // Filter out blobs that are targets of pending intents
+        intents.remove(&key);
+
+        // Filter out any unreferenced hashes that are still referenced by other intents
         unreferenced_from_op
             .retain(|hash| !intents.values().any(|intent_hash| intent_hash == hash));
 
-        Ok(unreferenced_from_op)
+        // Delete blobs BEFORE any checkpoint
+        if !unreferenced_from_op.is_empty() {
+            delete_fn(&unreferenced_from_op).map_err(|e| IndexError::BlobDeletion { source: e })?;
+        }
+
+        if rolled_over {
+            self.checkpoint_inner(CheckpointReason::SegmentRollover, &mut wal, &mut state)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn apply_remove_op(
+        &self,
+        keys: Vec<K>,
+        delete_fn: &crate::types::DeleteBlobCallFn,
+    ) -> Result<(), IndexError> {
+        let logical_op = WalOp::Remove { keys };
+        let intents = self.pending_intents.lock();
+        let mut state = self.state.write();
+        let mut wal = self.wal.lock();
+
+        let rolled_over = {
+            let (mut unreferenced_from_op, _append_info, rolled_over) =
+                Self::apply_wal_op_unsafe(&mut state, &mut wal, &logical_op)?;
+
+            // Remove any unreferenced hashes that are still referenced by intents
+            unreferenced_from_op
+                .retain(|hash| !intents.values().any(|intent_hash| intent_hash == hash));
+
+            // Delete blobs BEFORE any checkpoint
+            if !unreferenced_from_op.is_empty() {
+                delete_fn(&unreferenced_from_op)
+                    .map_err(|e| IndexError::BlobDeletion { source: e })?;
+            }
+            rolled_over
+        };
+
+        if rolled_over {
+            self.checkpoint_inner(CheckpointReason::SegmentRollover, &mut wal, &mut state)?;
+        }
+
+        Ok(())
     }
 
     fn initialize_directories(db_root: &PathBuf) -> Result<(), IndexError> {
@@ -317,7 +346,6 @@ impl<K: Debug> Debug for Index<K> {
         f.debug_struct("Index")
             .field("db_root", &self.paths.db_root_path())
             .field("index_file", &self.paths.index_file_path())
-            .field("checkpoint_meta_file", &self.paths.checkpoint_meta_path())
             .field(
                 "state_summary",
                 &format!(
@@ -411,11 +439,12 @@ mod tests {
                 .unwrap();
             assert_eq!(index.pending_intents.lock().len(), 1);
             assert_eq!(index.pending_intents.lock().get(&key), Some(&hash));
-            assert_eq!(index.state.read().hash_to_ref_count.get(&hash), Some(&1));
+            // No ref count changes from register_intent
+            assert_eq!(index.state.read().hash_to_ref_count.get(&hash), None);
         }
         // Guard dropped here - cleanup should happen
 
-        // After guard drop - intent removed, ref count decremented
+        // After guard drop - intent removed, no ref count changes
         assert_eq!(index.pending_intents.lock().len(), 0);
         assert_eq!(index.state.read().hash_to_ref_count.get(&hash), None);
     }
@@ -434,7 +463,8 @@ mod tests {
             .unwrap();
         assert_eq!(index.pending_intents.lock().len(), 1);
         assert_eq!(index.pending_intents.lock().get(&key), Some(&hash1));
-        assert_eq!(index.state.read().hash_to_ref_count.get(&hash1), Some(&1));
+        // No ref count changes from register_intent
+        assert_eq!(index.state.read().hash_to_ref_count.get(&hash1), None);
 
         // Second intent on same key - should replace first
         {
@@ -443,16 +473,18 @@ mod tests {
                 .unwrap();
             assert_eq!(index.pending_intents.lock().len(), 1);
             assert_eq!(index.pending_intents.lock().get(&key), Some(&hash2));
-            // hash1 ref count decremented, hash2 incremented
+            // No ref count changes from register_intent
             assert_eq!(index.state.read().hash_to_ref_count.get(&hash1), None);
-            assert_eq!(index.state.read().hash_to_ref_count.get(&hash2), Some(&1));
+            assert_eq!(index.state.read().hash_to_ref_count.get(&hash2), None);
         }
         // guard2 dropped - should restore hash1
 
         // After guard2 drop - hash1 restored, hash2 removed
         assert_eq!(index.pending_intents.lock().len(), 1);
         assert_eq!(index.pending_intents.lock().get(&key), Some(&hash1));
-        assert_eq!(index.state.read().hash_to_ref_count.get(&hash1), Some(&1));
+        // Dropping guard2 restores the previous intent but does not apply a WAL op,
+        // so refcounts in the state remain unchanged.
+        assert_eq!(index.state.read().hash_to_ref_count.get(&hash1), None);
         assert_eq!(index.state.read().hash_to_ref_count.get(&hash2), None);
     }
 
@@ -469,20 +501,22 @@ mod tests {
         // Register first intent
         let _guard1 = index.register_intent(key1.clone(), meta).unwrap();
         assert_eq!(index.pending_intents.lock().len(), 1);
-        assert_eq!(index.state.read().hash_to_ref_count.get(&hash), Some(&1));
+        // No ref count changes from register_intent
+        assert_eq!(index.state.read().hash_to_ref_count.get(&hash), None);
 
         // Register second intent with same hash
         {
             let _guard2 = index.register_intent(key2.clone(), meta).unwrap();
             assert_eq!(index.pending_intents.lock().len(), 2);
-            assert_eq!(index.state.read().hash_to_ref_count.get(&hash), Some(&2));
+            // Still no ref count changes
+            assert_eq!(index.state.read().hash_to_ref_count.get(&hash), None);
         }
-        // guard2 dropped - ref count should decrease but not reach 0
+        // guard2 dropped
 
         // After guard2 drop - still one intent remaining
         assert_eq!(index.pending_intents.lock().len(), 1);
         assert_eq!(index.pending_intents.lock().get(&key1), Some(&hash));
-        assert_eq!(index.state.read().hash_to_ref_count.get(&hash), Some(&1));
+        assert_eq!(index.state.read().hash_to_ref_count.get(&hash), None);
     }
 
     #[test]
@@ -497,15 +531,17 @@ mod tests {
             .register_intent(key.clone(), IntentMeta { blob_hash: hash, blob_size: 1 })
             .unwrap();
         assert_eq!(index.pending_intents.lock().len(), 1);
-        assert_eq!(index.state.read().hash_to_ref_count.get(&hash), Some(&1));
+        // No ref count from register_intent
+        assert_eq!(index.state.read().hash_to_ref_count.get(&hash), None);
 
-        // Commit the guard
-        let _to_delete = guard.commit().unwrap();
+        // Commit the guard with a no-op delete callback
+        let delete_fn =
+            |_hashes: &[BlobHash]| -> Result<(), crate::cas_manager::CasManagerError> { Ok(()) };
+        guard.commit(&delete_fn).unwrap();
 
-        // After commit - intent removed but ref count preserved (WAL operation keeps it)
+        // After commit - intent removed, ref count now set by WAL operation
         assert_eq!(index.pending_intents.lock().len(), 0);
-        // Note: ref count would normally be managed by the WAL operation in
-        // apply_wal_op_with_intent
+        assert_eq!(index.state.read().hash_to_ref_count.get(&hash), Some(&1));
     }
 
     #[test]
@@ -515,13 +551,15 @@ mod tests {
         assert_eq!(index.read_state().len(), 0);
         assert!(index.read_state().is_empty());
 
-        index
-            .apply_wal_op_unsafe(&WalOp::Put {
-                key: "a".to_string(),
-                hash: BlobHash::from([1u8; 32]),
-                size: 100,
-            })
+        let guard = index
+            .register_intent(
+                "a".to_string(),
+                IntentMeta { blob_hash: BlobHash::from([1u8; 32]), blob_size: 100 },
+            )
             .unwrap();
+        let delete_fn =
+            |_hashes: &[BlobHash]| -> Result<(), crate::cas_manager::CasManagerError> { Ok(()) };
+        guard.commit(&delete_fn).unwrap();
 
         assert_eq!(index.read_state().len(), 1);
         assert!(!index.read_state().is_empty());

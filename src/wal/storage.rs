@@ -337,7 +337,6 @@ impl SegmentStorage {
         Ok(())
     }
 
-    // ensures a WAL segment file exists
     pub(crate) fn ensure_segment_file_exists(
         &self,
         segment_id: u64,

@@ -125,16 +125,19 @@ where
             .register_intent(self.key.clone(), IntentMeta { blob_hash, blob_size: self.size })
             .map_err(crate::LibError::Index)?;
 
+        tracing::debug!(%blob_hash, key = ?self.key, "Committing transaction");
         let _cas_path = self
             .cas_inner
             .cas_manager
             .commit_blob(self.temp_file.path(), &blob_hash)
             .map_err(crate::LibError::Cas)?;
 
-        // Commit the intent - this applies the WAL operation and removes the intent
-        let to_delete = intent_guard.commit().map_err(crate::LibError::Index)?;
+        let delete_fn = |hashes: &[BlobHash]| -> Result<(), crate::cas_manager::CasManagerError> {
+            self.cas_inner.cas_manager.delete_blobs(hashes).map(|_| ())
+        };
 
-        self.cas_inner.cas_manager.delete_blobs(&to_delete).map_err(crate::LibError::Cas)?;
+        // Commit the intent - this applies the WAL operation and deletes unreferenced blobs
+        intent_guard.commit(&delete_fn).map_err(crate::LibError::Index)?;
 
         Ok(())
     }

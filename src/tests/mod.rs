@@ -1,4 +1,6 @@
 pub(crate) mod utils;
+use utils::setup_tracing;
+mod checkpoint;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -6,14 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use anyhow::Result;
 use tempfile::tempdir;
 
-use crate::index::CHECKPOINT_META_FILENAME;
 use crate::{Cas, Config, LibError, LibIoOperation, SyncMode};
-
-fn setup_tracing() {
-    let _ = tracing_subscriber::fmt::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
-}
 
 #[test]
 fn test_put_get_remove_string_key() -> Result<()> {
@@ -182,7 +177,6 @@ fn test_checkpoint_persists_index() -> Result<()> {
     let db_path = dir.path();
 
     let index_file_path = db_path.join("index");
-    let checkpoint_meta_path = db_path.join(CHECKPOINT_META_FILENAME);
 
     {
         let cas = Cas::open(db_path, Config::default())?;
@@ -192,10 +186,9 @@ fn test_checkpoint_persists_index() -> Result<()> {
 
         cas.checkpoint()?;
 
-        assert!(index_file_path.exists(), "index file should be created by checkpoint");
-        assert!(index_file_path.metadata()?.len() > 0, "index file should not be empty");
-        assert!(checkpoint_meta_path.exists(), "checkpoint meta file must exist");
-        assert_eq!(fs::read_to_string(&checkpoint_meta_path)?.trim(), "0");
+        assert!(index_file_path.exists(), "no index");
+        assert!(index_file_path.metadata()?.len() > 0, "empty index");
+        assert_eq!(cas.0.index.state.read().last_persisted_version, Some(1));
     }
 
     {

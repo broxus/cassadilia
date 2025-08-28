@@ -7,6 +7,8 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use thiserror::Error;
 
+use crate::cas_manager::CasManagerError;
+
 pub const HASH_SIZE: usize = blake3::OUT_LEN;
 
 #[derive(Clone, Copy, Eq, Ord, PartialOrd)]
@@ -303,7 +305,22 @@ pub enum TypesError {
 // === WAL ===
 
 /// Represents the checkpoint state of the WAL
+// Checkpoint stores the highest operation version that has been persisted to the index
 pub(crate) type CheckpointState = Option<u64>;
+
+pub(crate) type DeleteBlobCallFn<'a> = dyn Fn(&[BlobHash]) -> Result<(), CasManagerError> + 'a;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointReason {
+    /// Fresh database initialization
+    InitialSetup,
+    /// After replaying WAL operations
+    AfterReplay,
+    /// WAL segment is full or rolling over
+    SegmentRollover,
+    /// User explicitly requested checkpoint
+    Explicit,
+}
 
 pub const WAL_ENTRY_VERSION_SIZE: usize = size_of::<u64>();
 pub const WAL_ENTRY_OP_HASH_SIZE: usize = HASH_SIZE;

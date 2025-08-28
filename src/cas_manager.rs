@@ -184,9 +184,8 @@ impl CasManager {
         Ok(final_cas_path)
     }
 
-    /// Delete blobs from CAS that are no longer referenced
-    pub fn delete_blobs(&self, hashes: &[BlobHash]) -> Result<Vec<BlobHash>, CasManagerError> {
-        let mut actually_deleted_hashes = Vec::new();
+    /// Delete blobs from CAS that are unreferenced
+    pub fn delete_blobs(&self, hashes: &[BlobHash]) -> Result<(), CasManagerError> {
         let _fs_lock = self.fs_lock.lock();
 
         for hash in hashes {
@@ -197,7 +196,6 @@ impl CasManager {
                         "Successfully deleted unreferenced CAS file: {}",
                         file_path.display()
                     );
-                    actually_deleted_hashes.push(*hash);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     tracing::warn!(
@@ -216,6 +214,6 @@ impl CasManager {
             }
         }
 
-        Ok(actually_deleted_hashes)
+        Ok(())
     }
 }
