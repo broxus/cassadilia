@@ -25,7 +25,8 @@ pub enum SerializationError {
 }
 
 /// serialize `BTreeMap`<Vec<u8>, `IndexStateItem`> using hand-rolled format
-/// format: [u64 `last_persisted_version`][u32 `num_entries`][[u32 `key_len`][key_bytes][`32_bytes_hash`][u64 `blob_size`]]...
+/// format: [u64 `last_persisted_version`][u32 `num_entries`][[u32
+/// `key_len`][key_bytes][`32_bytes_hash`][u64 `blob_size`]]...
 pub(crate) fn serialize_index_state<K: KeyBytes>(
     map: &BTreeMap<K, IndexStateItem>,
     last_persisted_version: Option<u64>,
@@ -271,9 +272,7 @@ mod tests {
         K: KeyBytes + Ord,
     {
         let (map, _last_version) = deserialize_index_state(&data).unwrap();
-        map.into_iter()
-            .map(|(key, value)| (K::from_key_bytes(&key).unwrap(), value))
-            .collect()
+        map.into_iter().map(|(key, value)| (K::from_key_bytes(&key).unwrap(), value)).collect()
     }
 
     #[test]

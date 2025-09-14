@@ -142,10 +142,7 @@ fn test_overwrite_deletes_old_blob_no_orphans() -> Result<()> {
 
         // Verify state before shutdown: hash_a is gone, hash_b is active.
         let state = cas.0.index.state.read();
-        assert!(
-            !state.hash_to_ref_count.contains_key(&hash_a),
-            "hash_a still here"
-        );
+        assert!(!state.hash_to_ref_count.contains_key(&hash_a), "hash_a still here");
         assert_eq!(state.hash_to_ref_count.get(&hash_b), Some(&1), "hash_b refcnt != 1");
         drop(state);
 
@@ -219,20 +216,14 @@ fn test_empty_database_checkpoint_on_first_write() -> Result<()> {
     // Empty DB: no checkpoint
     harness.run_session(|cas| {
         assert_key_count(cas, 0);
-        assert!(
-            cas.0.index.state.read().last_persisted_version.is_none(),
-            "has checkpoint?"
-        );
+        assert!(cas.0.index.state.read().last_persisted_version.is_none(), "has checkpoint?");
         Ok(())
     })?;
 
     // Still empty
     harness.run_session(|cas| {
         assert_key_count(cas, 0);
-        assert!(
-            cas.0.index.state.read().last_persisted_version.is_none(),
-            "still has checkpoint?"
-        );
+        assert!(cas.0.index.state.read().last_persisted_version.is_none(), "still has checkpoint?");
         Ok(())
     })?;
 

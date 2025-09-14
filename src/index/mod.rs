@@ -358,6 +358,9 @@ impl<K: Debug> Debug for Index<K> {
     }
 }
 
+/// A read-only view of the index state.
+/// Holds a shared read lock for the duration of the guard.
+/// Supports lookup, iteration, and range queries in key order.
 pub struct IndexReadGuard<'a, K> {
     inner: parking_lot::RwLockReadGuard<'a, IndexState<K>>,
 }
@@ -366,22 +369,28 @@ impl<'a, K> IndexReadGuard<'a, K>
 where
     K: Debug + Clone + Ord,
 {
+    /// Returns the item for the given key, if it exists.
     pub fn get_item(&self, key: &K) -> Option<IndexStateItem> {
         self.inner.key_to_hash.get(key).copied()
     }
 
+    /// Returns the item for the given key, or an error if it is not present.
     pub fn require_item(&self, key: &K) -> Result<IndexStateItem, IndexError> {
         self.get_item(key).ok_or(IndexError::KeyNotFound { key: format!("{key:?}") })
     }
 
+    /// Returns `true` if the index contains the specified key.
     pub fn contains_key(&self, key: &K) -> bool {
         self.inner.key_to_hash.contains_key(key)
     }
 
+    /// Returns an iterator over all entries in ascending key order.
     pub fn iter(&self) -> std::collections::btree_map::Iter<'_, K, IndexStateItem> {
         self.inner.key_to_hash.iter()
     }
 
+    /// Returns an iterator over entries within the specified key range, in ascending order.
+    /// The range may use a borrowed form of the key (e.g., `&str` for `String`).
     pub fn range<T, R>(&self, range: R) -> std::collections::btree_map::Range<'_, K, IndexStateItem>
     where
         T: ?Sized + Ord,
@@ -391,18 +400,23 @@ where
         self.inner.key_to_hash.range(range)
     }
 
+    /// Returns a snapshot of the current key map.
+    /// Calls `clone` inside.
     pub fn keys_snapshot(&self) -> BTreeMap<K, IndexStateItem> {
         self.inner.key_to_hash.clone()
     }
 
+    /// Returns the number of keys in the index.
     pub fn len(&self) -> usize {
         self.inner.key_to_hash.len()
     }
 
+    /// Returns `true` if the index contains no keys.
     pub fn is_empty(&self) -> bool {
         self.inner.key_to_hash.is_empty()
     }
 
+    /// Returns an iterator over known blob hashes and their reference counts.
     pub fn known_blobs(&self) -> std::collections::hash_map::Iter<'_, BlobHash, u32> {
         self.inner.hash_to_ref_count.iter()
     }

@@ -209,7 +209,8 @@ fn replay_should_ignore_segments_before_checkpoint() {
     append_ops(&mut wal_manager, 4); // v1,2 in seg 0; v3,4 in seg 1
 
     // Checkpoint after seg 1; prunes seg 0
-    let checkpoint_version = perform_checkpoint(&mut wal_manager, CheckpointReason::Explicit, false, None).unwrap();
+    let checkpoint_version =
+        perform_checkpoint(&mut wal_manager, CheckpointReason::Explicit, false, None).unwrap();
     assert_eq!(checkpoint_version, Some(4)); // Checkpoint at version 4
 
     // Append more ops to create segment 2.

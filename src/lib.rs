@@ -293,6 +293,8 @@ where
         Ok(Self { lockfile, paths, index, datasync_channel, cas_manager })
     }
 
+    /// Returns a read-only view of the index state.
+    /// The returned guard holds a shared read lock until dropped.
     pub fn read_index_state(&self) -> IndexReadGuard<'_, K> {
         self.index.read_state()
     }
@@ -317,18 +319,32 @@ where
         })
     }
 
+    /// Get a blob by its key.
+    /// Returns `Ok(None)` if the key does not exist.
     pub fn get(&self, key: &K) -> Result<Option<bytes::Bytes>, LibError> {
         self.with_blob_item(key, |item| self.cas_manager.read_blob(&item.blob_hash))
     }
 
+    /// Get the size of a blob by its key.
+    /// Returns `Ok(None)` if the key does not exist.
+    /// Uses index metadata only; no blob I/O.
     pub fn get_size(&self, key: &K) -> Result<Option<u64>, LibError> {
         self.with_blob_item(key, |item| Ok(item.blob_size))
     }
 
+    /// Get a `BufReader` by key.
+    /// Returns `Ok(None)` if the key does not exist.
+    /// Safe to hold for long periods, will stream data even if the key was deleted.
     pub fn get_reader(&self, key: &K) -> Result<Option<BufReader<File>>, LibError> {
         self.with_blob_item(key, |item| self.cas_manager.blob_bufreader(&item.blob_hash))
     }
 
+    /// Get a range of bytes from a blob.
+    /// Returns `Ok(None)` if the key does not exist.
+    /// Behavior:
+    /// - Returns empty bytes if `range_start == range_end` or `range_start >= blob size`.
+    /// - Returns an error if `range_start > range_end`.
+    /// - Clamps `range_end` to the blob size if it exceeds it.
     pub fn get_range(
         &self,
         key: &K,
@@ -345,6 +361,7 @@ where
         })
     }
 
+    /// Remove key-value pair from the CAS
     pub fn remove(&self, key: &K) -> Result<bool, LibError> {
         if self.index.read_state().contains_key(key) {
             let delete_fn = |hashes: &[BlobHash]| -> Result<(), CasManagerError> {
@@ -358,6 +375,12 @@ where
         }
     }
 
+    /// Removes all key-value pairs within the specified range.
+    ///
+    /// Note: This operation provides eventual consistency rather than strict atomicity.
+    /// The count returned reflects keys present at the time of initial scan, but:
+    /// - Keys added to the range during removal won't be removed
+    /// - Keys removed by concurrent operations will be gracefully skipped
     pub fn remove_range<R>(&self, range: R) -> Result<usize, LibError>
     where
         R: RangeBounds<K> + Debug + Clone,
@@ -384,6 +407,9 @@ where
         Ok(keys_to_remove_count)
     }
 
+    /// Checkpoint the index to persist the current state.
+    /// Automatically triggered on WAL segment rollover; explicit calls persist the index
+    /// and prune old WAL segments. Usually no need to call this manually.
     pub fn checkpoint(&self) -> Result<(), LibError> {
         self.index.checkpoint(CheckpointReason::Explicit).map_err(LibError::Index)
     }
