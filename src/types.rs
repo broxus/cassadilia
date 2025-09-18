@@ -1,6 +1,7 @@
 use std::fmt;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -201,7 +202,7 @@ pub enum SyncMode {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub sync_mode: SyncMode,
-    pub num_ops_per_wal: u64,
+    pub num_ops_per_wal: NonZeroU64,
     /// Whether to pre-create directories for CAS blobs
     /// Will create 65k dirs on the first run
     pub pre_create_cas_dirs: bool,
@@ -216,7 +217,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             sync_mode: SyncMode::default(),
-            num_ops_per_wal: 100_000,
+            num_ops_per_wal: NonZeroU64::new(10_000).unwrap(),
             pre_create_cas_dirs: false,
             scan_orphans_on_startup: true,
             verify_blob_integrity: false,
@@ -304,9 +305,9 @@ pub enum TypesError {
 
 // === WAL ===
 
-/// Represents the checkpoint state of the WAL
-// Checkpoint stores the highest operation version that has been persisted to the index
-pub(crate) type CheckpointState = Option<u64>;
+/// At each operation index was checkpointed.
+/// None means checkpoint has never been performed.
+pub(crate) type CheckpointState = Option<NonZeroU64>;
 
 pub(crate) type DeleteBlobCallFn<'a> = dyn Fn(&[BlobHash]) -> Result<(), CasManagerError> + 'a;
 

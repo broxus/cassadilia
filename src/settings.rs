@@ -1,3 +1,4 @@
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -5,13 +6,13 @@ use thiserror::Error;
 
 use crate::io::atomically_write_file_bytes;
 
-pub const CURRENT_DB_VERSION: u32 = 2;
+pub const CURRENT_DB_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub(crate) struct DbSettings {
     pub version: u32,
     pub dir_tree_is_pre_created: bool,
-    pub num_ops_per_wal: u64,
+    pub num_ops_per_wal: NonZeroU64,
 }
 
 #[derive(Error, Debug)]
@@ -93,7 +94,7 @@ mod tests {
         // Create database with pre-created directories
         let config = Config {
             sync_mode: SyncMode::Sync,
-            num_ops_per_wal: 100,
+            num_ops_per_wal: NonZeroU64::new(100).unwrap(),
             pre_create_cas_dirs: true,
             ..Default::default()
         };
@@ -151,7 +152,7 @@ mod tests {
         // Create database with specific num_ops_per_wal
         let config = Config {
             sync_mode: SyncMode::Sync,
-            num_ops_per_wal: 1000,
+            num_ops_per_wal: NonZeroU64::new(1000).unwrap(),
             pre_create_cas_dirs: false,
             ..Default::default()
         };
@@ -163,7 +164,7 @@ mod tests {
         // Try to re-open with different num_ops_per_wal
         let config2 = Config {
             sync_mode: SyncMode::Sync,
-            num_ops_per_wal: 2000, // Different value
+            num_ops_per_wal: NonZeroU64::new(2000).unwrap(), // Different value
             pre_create_cas_dirs: false,
             ..Default::default()
         };
@@ -187,7 +188,7 @@ mod tests {
 
         let config = Config {
             sync_mode: SyncMode::Sync,
-            num_ops_per_wal: 5000,
+            num_ops_per_wal: NonZeroU64::new(5000).unwrap(),
             pre_create_cas_dirs: true,
             ..Default::default()
         };
@@ -206,7 +207,7 @@ mod tests {
 
         assert_eq!(loaded_settings.version, CURRENT_DB_VERSION);
         assert!(loaded_settings.dir_tree_is_pre_created);
-        assert_eq!(loaded_settings.num_ops_per_wal, 5000);
+        assert_eq!(loaded_settings.num_ops_per_wal.get(), 5000);
 
         Ok(())
     }

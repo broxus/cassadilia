@@ -1,13 +1,13 @@
 #[cfg(test)]
 mod tests;
 
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 
 use replay::WalReplayer;
 use storage::{SegmentStorage, SegmentWriter};
 use thiserror::Error;
 
-use crate::io::IoError;
 use crate::paths::DbPaths;
 use crate::serialization::SerializationError;
 use crate::types::{BlobHash, CheckpointReason, CheckpointState, TypesError, WalOp};
@@ -16,9 +16,12 @@ use crate::{KeyBytes, calculate_blob_hash};
 mod replay;
 mod storage;
 
+const INITIAL_SEGMENT_ID: u64 = 0;
+const FIRST_OP_VERSION: NonZeroU64 = NonZeroU64::new(1).unwrap();
+
 #[derive(Debug)]
 pub(crate) struct WalAppendInfo {
-    pub version: u64,
+    pub version: NonZeroU64,
     #[allow(unused)]
     pub op_hash: BlobHash,
 }
@@ -27,9 +30,6 @@ pub(crate) struct WalAppendInfo {
 pub enum WalError {
     #[error("Failed to parse segment ID from checkpoint metadata")]
     ParseCheckpointMetaSegmentId(#[source] std::num::ParseIntError),
-    #[error("Failed to atomically write checkpoint metadata")]
-    AtomicWriteCheckpointMeta(#[from] IoError),
-
     #[error("WAL IO error during {operation:?} (path: {path:?})")]
     Io {
         operation: WalIoOperation,
@@ -38,16 +38,16 @@ pub enum WalError {
         source: std::io::Error,
     },
 
-    #[error("WAL consistency error: attempting to write to an older segment")]
-    WriteToOlderSegment { op_version: u64, target_segment: u64, current_segment: u64 },
-
     #[error("Failed to write WAL entry data (version {op_version}, segment {segment_id})")]
     WriteWalEntryDataIO {
-        op_version: u64,
+        op_version: NonZeroU64,
         segment_id: u64,
         #[source]
         source: std::io::Error,
     },
+
+    #[error("Invalid operation version: {version} (must be > 0)")]
+    InvalidOpVersion { version: u64 },
 
     #[error("WAL replay IO error during {step:?} for segment {segment_id} (path: {path:?})")]
     ReplayIo {
@@ -65,7 +65,7 @@ pub enum WalError {
         "WAL corruption: failed to deserialize WalOpRaw (version {version}, segment {segment_id})"
     )]
     ReplayDeserializeWalOpRaw {
-        version: u64,
+        version: NonZeroU64,
         segment_id: u64,
         #[source]
         source: SerializationError,
@@ -74,7 +74,7 @@ pub enum WalError {
         "WAL replay: failed to convert WalOpRaw to WalOp<K> (version {version}, segment {segment_id})"
     )]
     ReplayConvertWalOp {
-        version: u64,
+        version: NonZeroU64,
         segment_id: u64,
         #[source]
         source: TypesError,
@@ -104,8 +104,8 @@ pub enum WalReplayIoStep {
 }
 
 pub(crate) struct WalManager {
-    num_ops_per_wal: u64,
-    next_op_version: u64,
+    num_ops_per_wal: NonZeroU64,
+    next_op_version: NonZeroU64,
 
     storage: SegmentStorage,
 
@@ -113,7 +113,7 @@ pub(crate) struct WalManager {
 }
 
 impl WalManager {
-    pub(crate) fn new(paths: DbPaths, num_ops_per_wal: u64) -> Result<Self, WalError> {
+    pub(crate) fn new(paths: DbPaths, num_ops_per_wal: NonZeroU64) -> Result<Self, WalError> {
         std::fs::create_dir_all(paths.db_root_path()).map_err(|e| WalError::Io {
             operation: WalIoOperation::CreateDbDir,
             path: None,
@@ -121,43 +121,33 @@ impl WalManager {
         })?;
 
         let storage = SegmentStorage::new(paths.clone());
-        Ok(WalManager { num_ops_per_wal, next_op_version: 1, storage, active_writer: None })
+        Ok(WalManager {
+            num_ops_per_wal,
+            next_op_version: FIRST_OP_VERSION,
+            storage,
+            active_writer: None,
+        })
     }
 
     /// Decide the checkpoint target version for the given reason without performing any IO.
     /// Returns `Some(version)` when a checkpoint should be performed and `None` when it should be
-    /// skipped. The returned version is the highest written op version (i.e., `next_op_version -
-    /// 1`).
+    /// skipped.
+    /// The returned version is the highest written op version (i.e., `next_op_version - 1`).
     pub(crate) fn compute_checkpoint_target(
         &self,
         reason: CheckpointReason,
         last_checkpointed_version: CheckpointState,
-    ) -> Option<u64> {
+    ) -> Option<NonZeroU64> {
         let should_checkpoint = match reason {
-            CheckpointReason::InitialSetup => {
-                // Only checkpoint on initial setup if no checkpoint exists
-                last_checkpointed_version.is_none()
-            }
+            CheckpointReason::InitialSetup => last_checkpointed_version.is_none(),
             CheckpointReason::AfterReplay | CheckpointReason::Explicit => true,
-            CheckpointReason::SegmentRollover => {
-                // Checkpoint on segment rollover if we have new operations since the last
-                // checkpoint
-                match last_checkpointed_version {
-                    Some(last_checkpoint) => self.next_op_version > last_checkpoint + 1,
-                    None => {
-                        // No checkpoint exists yet - only checkpoint if we've written data
-                        self.next_op_version > 1
-                    }
-                }
-            }
+            CheckpointReason::SegmentRollover => match last_checkpointed_version {
+                None => self.has_written_ops(),
+                Some(version) => self.has_new_ops_since(version),
+            },
         };
 
-        if !should_checkpoint {
-            return None;
-        }
-
-        // target the last written op
-        Some(self.next_op_version.saturating_sub(1))
+        if should_checkpoint { self.last_written_op_version() } else { None }
     }
 
     /// Prune stale segments for the provided checkpoint version.
@@ -165,7 +155,7 @@ impl WalManager {
     /// no-op.
     pub(crate) fn commit_checkpoint(
         &mut self,
-        version: u64,
+        version: NonZeroU64,
         last_checkpointed_version: CheckpointState,
     ) -> Result<(), WalError> {
         // Do not go backwards; allow equal (idempotent).
@@ -181,22 +171,37 @@ impl WalManager {
         }
 
         // Prune segments where all operations have version <= checkpoint_version
-        let last_checkpointed_segment = self.segment_id_for_op_version(version);
+        let last_checkpointed_segment = self.segment_id_for_op_version(version.get());
         let _ = self.storage.prune_stale_segments(last_checkpointed_segment);
 
         tracing::info!(checkpoint_version = version, "Checkpoint committed");
         Ok(())
     }
 
-    pub(crate) fn get_next_op_version(&self) -> u64 {
+    fn has_written_ops(&self) -> bool {
+        self.next_op_version > FIRST_OP_VERSION
+    }
+
+    fn has_new_ops_since(&self, checkpoint_version: NonZeroU64) -> bool {
+        self.next_op_version > (checkpoint_version.saturating_add(1))
+    }
+
+    fn last_written_op_version(&self) -> Option<NonZeroU64> {
+        NonZeroU64::new(self.next_op_version.get().saturating_sub(1))
+    }
+
+    pub(crate) fn get_next_op_version(&self) -> NonZeroU64 {
         self.next_op_version
     }
 
     /// get and increment the next operation version, returning the version to use for the current
     /// operation
-    pub(crate) fn allocate_next_op_version(&mut self) -> u64 {
+    pub(crate) fn allocate_next_op_version(&mut self) -> NonZeroU64 {
         let current_version = self.next_op_version;
-        self.next_op_version += 1;
+        // NOTE: currently don't wrap around, so it will be stuck after `u64::MAX` operations.
+        // Extremely unlikely to hit this in practise.
+        // Will take 500k years at 1m ops/sec.
+        self.next_op_version = self.next_op_version.saturating_add(1);
         current_version
     }
 
@@ -211,17 +216,20 @@ impl WalManager {
         let replayer = WalReplayer::new(&self.storage, last_checkpointed_version);
 
         let highest_op_version = replayer.replay(apply_op_fn)?;
-        self.next_op_version = highest_op_version + 1;
+        self.next_op_version = match highest_op_version {
+            Some(v) => v.saturating_add(1),
+            None => FIRST_OP_VERSION,
+        };
 
-        // ensure next segment file exists using self.storage
+        // ensure next segment file exists
         let next_op_version = self.get_next_op_version();
-        let target_segment_id = self.segment_id_for_op_version(next_op_version);
-        self.storage.ensure_segment_file_exists(target_segment_id, next_op_version)
+        let target_segment_id = self.segment_id_for_op_version(next_op_version.get());
+        self.storage.ensure_segment_file_exists(target_segment_id, next_op_version.get())
     }
 
     pub(crate) fn append_op(&mut self, op_data: &[u8]) -> Result<WalAppendInfo, WalError> {
         let version = self.allocate_next_op_version();
-        let target_segment_id = self.segment_id_for_op_version(version);
+        let target_segment_id = self.segment_id_for_op_version(version.get());
 
         // check if we need to roll over to a new segment file.
         let must_rollover =
@@ -244,11 +252,15 @@ impl WalManager {
     /// get the segment ID for the operation that would be placed at the previous operation version
     /// this is used for checkpoint calculations
     pub(crate) fn get_segment_id_for_previous_op(&self) -> u64 {
-        self.segment_id_for_op_version(self.next_op_version.saturating_sub(1))
+        self.last_written_op_version()
+            .map_or(INITIAL_SEGMENT_ID, |v| self.segment_id_for_op_version(v.get()))
     }
 
     pub(crate) fn segment_id_for_op_version(&self, op_version: u64) -> u64 {
-        (op_version.saturating_sub(1)) / self.num_ops_per_wal
+        assert_ne!(op_version, 0);
+        // Op versions start at FIRST_OP_VERSION, but segment IDs start at 0
+        // So op version 1-N maps to segment 0, N+1-2N maps to segment 1, etc.
+        (op_version.saturating_sub(1)) / self.num_ops_per_wal.get()
     }
 }
 

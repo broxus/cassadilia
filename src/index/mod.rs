@@ -255,7 +255,7 @@ where
 
         let unreferenced = state.apply_logical_op(logical_op).expect("Index is corrupted");
 
-        let post_append_segment_id = wal.segment_id_for_op_version(append_info.version);
+        let post_append_segment_id = wal.segment_id_for_op_version(append_info.version.get());
         let rolled_over = pre_append_segment_id != post_append_segment_id;
 
         Ok((unreferenced, append_info, rolled_over))

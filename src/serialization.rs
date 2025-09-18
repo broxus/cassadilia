@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 
 use thiserror::Error;
 
@@ -29,12 +30,12 @@ pub enum SerializationError {
 /// `key_len`][key_bytes][`32_bytes_hash`][u64 `blob_size`]]...
 pub(crate) fn serialize_index_state<K: KeyBytes>(
     map: &BTreeMap<K, IndexStateItem>,
-    last_persisted_version: Option<u64>,
+    last_persisted_version: Option<NonZeroU64>,
 ) -> Vec<u8> {
     let mut result = Vec::new();
 
-    // write last_persisted_version (0 means None)
-    let version = last_persisted_version.unwrap_or(0);
+    // write last_persisted_version (0 means no checkpoint)
+    let version = last_persisted_version.map_or(0, |v| v.get());
     result.extend_from_slice(&version.to_le_bytes());
 
     // write number of entries
@@ -64,7 +65,7 @@ pub(crate) fn serialize_index_state<K: KeyBytes>(
 }
 
 /// deserialize `BTreeMap`<Vec<u8>, `IndexStateItem`> using hand-rolled format
-pub(crate) type DecodedIndexState = (BTreeMap<Vec<u8>, IndexStateItem>, Option<u64>);
+pub(crate) type DecodedIndexState = (BTreeMap<Vec<u8>, IndexStateItem>, Option<NonZeroU64>);
 
 pub(crate) fn deserialize_index_state(
     bytes: &[u8],
@@ -72,8 +73,8 @@ pub(crate) fn deserialize_index_state(
     let mut bytes = bytes;
 
     // read last_persisted_version
-    let version = read_u64(&mut bytes, "IndexState version")?;
-    let last_persisted_version = if version == 0 { None } else { Some(version) };
+    let version_value = read_u64(&mut bytes, "IndexState version")?;
+    let last_persisted_version = NonZeroU64::new(version_value);
 
     // read number of entries
     let num_entries = read_u32(&mut bytes, "BTreeMap header")?;
@@ -323,7 +324,7 @@ mod tests {
         let mut map: BTreeMap<Vec<u8>, IndexStateItem> = BTreeMap::new();
         map.insert(b"k1".to_vec(), make_test_item(21));
 
-        let expected_version = Some(123_456_789u64);
+        let expected_version = NonZeroU64::new(123_456_789);
         let serialized = serialize_index_state(&map, expected_version);
         let (decoded_map, last_version) = deserialize_index_state(&serialized).unwrap();
 

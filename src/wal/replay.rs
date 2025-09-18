@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use super::storage::SegmentStorage;
 use crate::serialization::deserialize_wal_op_raw;
 use crate::types::{CheckpointState, KeyBytes, WalOp};
@@ -18,11 +20,16 @@ impl<'a> WalReplayer<'a> {
 
     // replays segments and calls the provided function to update application state.
     // returns the highest operation version found in the WAL.
-    pub(crate) fn replay<K>(&self, mut apply_op_fn: impl FnMut(WalOp<K>)) -> Result<u64, WalError>
+    pub(crate) fn replay<K>(
+        &self,
+        mut apply_op_fn: impl FnMut(WalOp<K>),
+    ) -> Result<Option<NonZeroU64>, WalError>
     where
         K: KeyBytes + Clone + Eq + Ord + std::fmt::Debug + 'static,
     {
-        let checkpoint = self.last_checkpointed_op_version.unwrap_or(0);
+        // last checkpointed version, starting point for replay. None means that no checkpoint
+        // has been made yet.
+        let checkpoint = self.last_checkpointed_op_version;
         let mut highest = checkpoint;
 
         let segments = self.storage.discover_segments()?;
@@ -42,10 +49,13 @@ impl<'a> WalReplayer<'a> {
 
             for entry in reader {
                 let entry = entry?;
-                highest = highest.max(entry.version);
+                highest = match highest {
+                    Some(prev) => Some(prev.max(entry.version)),
+                    None => Some(entry.version),
+                };
 
                 // Skip already-checkpointed ops
-                if entry.version <= checkpoint {
+                if checkpoint.is_some_and(|c| entry.version <= c) {
                     continue;
                 }
 

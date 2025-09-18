@@ -1,5 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, ErrorKind, Read, Write};
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 
 use crate::calculate_blob_hash;
@@ -26,14 +27,14 @@ impl SegmentWriter {
     // writes a single, complete entry and syncs it to disk.
     pub(crate) fn write_entry(
         &mut self,
-        op_version: u64,
+        op_version: NonZeroU64,
         op_hash: BlobHash,
         op_data: &[u8],
     ) -> Result<(), WalError> {
         let header_bytes_written = WAL_ENTRY_HEADER_SIZE as u32;
         let op_data_len = op_data.len() as u32;
 
-        self.writer.write_all(&op_version.to_le_bytes()).map_err(|io_err| {
+        self.writer.write_all(&op_version.get().to_le_bytes()).map_err(|io_err| {
             WalError::WriteWalEntryDataIO {
                 op_version,
                 segment_id: self.segment_id,
@@ -125,7 +126,7 @@ pub(crate) struct SegmentReader {
 }
 
 pub(crate) struct WalEntryRaw {
-    pub version: u64,
+    pub version: NonZeroU64,
     pub op_data: Vec<u8>,
 }
 
@@ -193,8 +194,8 @@ impl Iterator for SegmentReader {
             return None;
         }
 
-        let mut op_data_buf = vec![0u8; op_len];
-        if let Err(e) = self.file.read_exact(&mut op_data_buf) {
+        let mut op_data = vec![0u8; op_len];
+        if let Err(e) = self.file.read_exact(&mut op_data) {
             return Some(Err(WalError::ReplayIo {
                 step: WalReplayIoStep::ReadOpData,
                 segment_id: self.segment_id,
@@ -203,7 +204,7 @@ impl Iterator for SegmentReader {
             }));
         }
 
-        let actual_op_hash = calculate_blob_hash(&op_data_buf);
+        let actual_op_hash = calculate_blob_hash(&op_data);
         if actual_op_hash.0 != expected_op_hash_bytes {
             return Some(Err(WalError::ReplayChecksumMismatch {
                 version,
@@ -213,7 +214,10 @@ impl Iterator for SegmentReader {
             }));
         }
 
-        Some(Ok(WalEntryRaw { version, op_data: op_data_buf }))
+        match NonZeroU64::new(version) {
+            Some(version) => Some(Ok(WalEntryRaw { version, op_data })),
+            None => Some(Err(WalError::InvalidOpVersion { version })),
+        }
     }
 }
 

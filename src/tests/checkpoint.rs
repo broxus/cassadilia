@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use anyhow::Result;
 
 use crate::tests::utils::*;
@@ -6,7 +8,10 @@ use crate::{Config, calculate_blob_hash};
 #[test]
 fn test_replay_creates_checkpoint_after_restart() -> Result<()> {
     setup_tracing();
-    let harness = CasTestHarness::new(Config { num_ops_per_wal: 10, ..Default::default() })?;
+    let harness = CasTestHarness::new(Config {
+        num_ops_per_wal: NonZeroU64::new(10).unwrap(),
+        ..Default::default()
+    })?;
 
     // Write 5 ops, no explicit checkpoint.
     harness.run_session(|cas| {
@@ -24,7 +29,7 @@ fn test_replay_creates_checkpoint_after_restart() -> Result<()> {
         verify_refcount_integrity(cas, 5)?; // Verifies no double-replay
 
         // Checkpoint should now exist at version 5
-        assert_eq!(cas.0.index.state.read().last_persisted_version, Some(5));
+        assert_eq!(cas.0.index.state.read().last_persisted_version, NonZeroU64::new(5));
 
         // Write 3 more ops
         populate_cas(cas, 5..8, "data")?;
@@ -42,7 +47,7 @@ fn test_replay_creates_checkpoint_after_restart() -> Result<()> {
         verify_refcount_integrity(cas, 8)?;
 
         // Checkpoint = 8 from prior session
-        assert_eq!(cas.0.index.state.read().last_persisted_version, Some(8));
+        assert_eq!(cas.0.index.state.read().last_persisted_version, NonZeroU64::new(8));
         Ok(())
     })?;
 
@@ -52,7 +57,10 @@ fn test_replay_creates_checkpoint_after_restart() -> Result<()> {
 #[test]
 fn test_checkpoint_persists_overwrites_correctly() -> Result<()> {
     setup_tracing();
-    let harness = CasTestHarness::new(Config { num_ops_per_wal: 10, ..Default::default() })?;
+    let harness = CasTestHarness::new(Config {
+        num_ops_per_wal: NonZeroU64::new(10).unwrap(),
+        ..Default::default()
+    })?;
 
     // Write 15 items, creating two WAL segments.
     harness.run_session(|cas| {
@@ -93,7 +101,7 @@ fn test_checkpoint_persists_overwrites_correctly() -> Result<()> {
 fn test_checkpoint_prevents_double_replay() -> Result<()> {
     setup_tracing();
     let harness = CasTestHarness::new(Config {
-        num_ops_per_wal: 100, // Keep everything in one segment
+        num_ops_per_wal: NonZeroU64::new(100).unwrap(), // Keep everything in one segment
         ..Default::default()
     })?;
 
@@ -120,7 +128,7 @@ fn test_checkpoint_prevents_double_replay() -> Result<()> {
 fn test_overwrite_deletes_old_blob_no_orphans() -> Result<()> {
     setup_tracing();
     let harness = CasTestHarness::new(Config {
-        num_ops_per_wal: 100,
+        num_ops_per_wal: NonZeroU64::new(100).unwrap(),
         scan_orphans_on_startup: true,
         ..Default::default()
     })?;
@@ -168,7 +176,7 @@ fn test_overwrite_deletes_old_blob_no_orphans() -> Result<()> {
 fn test_wal_segment_rollover_triggers_checkpoint() -> Result<()> {
     setup_tracing();
     let harness = CasTestHarness::new(Config {
-        num_ops_per_wal: 5, // Small segments to test rollover
+        num_ops_per_wal: NonZeroU64::new(5).unwrap(), // Small segments to test rollover
         ..Default::default()
     })?;
 
@@ -190,7 +198,11 @@ fn test_wal_segment_rollover_triggers_checkpoint() -> Result<()> {
 
         // After rollover, segment 0 is pruned, only segment 1 remains
         assert_eq!(count_wal_segments(harness.db_path())?, 1, "seg0 not pruned");
-        assert_eq!(cas.0.index.state.read().last_persisted_version, Some(6), "checkpoint != 6");
+        assert_eq!(
+            cas.0.index.state.read().last_persisted_version,
+            NonZeroU64::new(6),
+            "checkpoint != 6"
+        );
         Ok(())
     })?;
 
@@ -201,7 +213,11 @@ fn test_wal_segment_rollover_triggers_checkpoint() -> Result<()> {
         verify_cas_data(cas, 5..6, "segment1")?;
 
         // Verify checkpoint is still at version 6
-        assert_eq!(cas.0.index.state.read().last_persisted_version, Some(6), "checkpoint lost");
+        assert_eq!(
+            cas.0.index.state.read().last_persisted_version,
+            NonZeroU64::new(6),
+            "checkpoint lost"
+        );
         Ok(())
     })?;
 
@@ -211,7 +227,10 @@ fn test_wal_segment_rollover_triggers_checkpoint() -> Result<()> {
 #[test]
 fn test_empty_database_checkpoint_on_first_write() -> Result<()> {
     setup_tracing();
-    let harness = CasTestHarness::new(Config { num_ops_per_wal: 10, ..Default::default() })?;
+    let harness = CasTestHarness::new(Config {
+        num_ops_per_wal: NonZeroU64::new(10).unwrap(),
+        ..Default::default()
+    })?;
 
     // Empty DB: no checkpoint
     harness.run_session(|cas| {
@@ -237,7 +256,11 @@ fn test_empty_database_checkpoint_on_first_write() -> Result<()> {
     // Now expect a checkpoint
     harness.run_session(|cas| {
         assert_key_count(cas, 1);
-        assert_eq!(cas.0.index.state.read().last_persisted_version, Some(1), "no checkpoint at 1");
+        assert_eq!(
+            cas.0.index.state.read().last_persisted_version,
+            NonZeroU64::new(1),
+            "no checkpoint at 1"
+        );
         verify_cas_data(cas, 0..1, "first")?;
         Ok(())
     })?;

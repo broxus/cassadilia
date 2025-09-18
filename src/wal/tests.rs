@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io::Write;
+use std::num::NonZeroU64;
 
 use tempfile::tempdir;
 
@@ -10,7 +11,7 @@ fn perform_checkpoint(
     reason: CheckpointReason,
     seal_current_segment: bool,
     last_checkpointed_version: CheckpointState,
-) -> Result<Option<u64>, WalError> {
+) -> Result<CheckpointState, WalError> {
     let target = wal.compute_checkpoint_target(reason, last_checkpointed_version);
     let Some(version) = target else {
         return Ok(None);
@@ -25,6 +26,7 @@ fn perform_checkpoint(
     wal.commit_checkpoint(version, last_checkpointed_version)?;
     Ok(Some(version))
 }
+
 use crate::paths::DbPaths;
 use crate::serialization::serialize_wal_op_raw;
 use crate::types::{BlobHash, CheckpointReason, WalOpRaw};
@@ -49,7 +51,7 @@ impl KeyBytes for TestKey {
 fn setup_wal_manager(num_ops_per_wal: u64) -> (WalManager, tempfile::TempDir) {
     let dir = tempdir().unwrap();
     let paths = DbPaths::new(dir.path().to_path_buf());
-    let wal_manager = WalManager::new(paths, num_ops_per_wal).unwrap();
+    let wal_manager = WalManager::new(paths, NonZeroU64::new(num_ops_per_wal).unwrap()).unwrap();
     (wal_manager, dir)
 }
 
@@ -76,7 +78,7 @@ fn wal_manager_new_fails_on_uncreatable_directory() {
         // A path inside /proc is not writable by normal users.
         let invalid_path = std::path::PathBuf::from("/proc/test_wal_invalid");
         let paths = DbPaths::new(invalid_path);
-        let result = WalManager::new(paths, 100);
+        let result = WalManager::new(paths, NonZeroU64::new(100).unwrap());
 
         // We expect an I/O error related to creating the directory.
         assert!(matches!(result, Err(WalError::Io { .. })));
@@ -89,7 +91,7 @@ fn append_op_fails_when_segment_rollover_cannot_create_file() {
 
     // Append two ops to fill segment 0.
     append_ops(&mut wal_manager, 2);
-    assert_eq!(wal_manager.get_next_op_version(), 3);
+    assert_eq!(wal_manager.get_next_op_version().get(), 3);
 
     // Make the directory read-only to prevent creation of the next segment file.
     #[cfg(unix)]
@@ -129,7 +131,7 @@ fn checkpoint_succeeds_and_prunes_old_segments() {
     // Checkpoint; prune segments < 2
     let result = perform_checkpoint(&mut wal_manager, CheckpointReason::Explicit, false, None);
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), Some(5)); // Returns checkpoint version (5), not segment ID
+    assert_eq!(result.unwrap(), NonZeroU64::new(5)); // Returns checkpoint version (5), not segment ID
 
     // Verify segments 0 and 1 are gone, but segment 2 remains.
     let segments = wal_manager.storage.discover_segments().unwrap();
@@ -211,17 +213,17 @@ fn replay_should_ignore_segments_before_checkpoint() {
     // Checkpoint after seg 1; prunes seg 0
     let checkpoint_version =
         perform_checkpoint(&mut wal_manager, CheckpointReason::Explicit, false, None).unwrap();
-    assert_eq!(checkpoint_version, Some(4)); // Checkpoint at version 4
+    assert_eq!(checkpoint_version, NonZeroU64::new(4)); // Checkpoint at version 4
 
     // Append more ops to create segment 2.
     append_ops(&mut wal_manager, 2); // v5,6 in seg 2
 
     // Simulate a restart
     let paths = DbPaths::new(dir.path().to_path_buf());
-    let mut new_wal_manager = WalManager::new(paths, 2).unwrap();
+    let mut new_wal_manager = WalManager::new(paths, NonZeroU64::new(2).unwrap()).unwrap();
 
     let mut replayed_ops_count = 0;
-    let result = new_wal_manager.replay_and_prepare::<TestKey>(Some(4), |_op| {
+    let result = new_wal_manager.replay_and_prepare::<TestKey>(NonZeroU64::new(4), |_op| {
         replayed_ops_count += 1;
         tracing::debug!("Replaying op #{}", replayed_ops_count);
     });
@@ -231,7 +233,7 @@ fn replay_should_ignore_segments_before_checkpoint() {
     assert_eq!(replayed_ops_count, 2, "replayed wrong count");
 
     // Next version = 7 (after v6)
-    assert_eq!(new_wal_manager.get_next_op_version(), 7);
+    assert_eq!(new_wal_manager.get_next_op_version().get(), 7);
 }
 #[test]
 fn replay_on_completely_empty_directory() {
@@ -246,7 +248,7 @@ fn replay_on_completely_empty_directory() {
 
     assert!(result.is_ok());
     assert_eq!(replayed_ops.len(), 0);
-    assert_eq!(wal_manager.get_next_op_version(), 1);
+    assert_eq!(wal_manager.get_next_op_version().get(), 1);
 }
 
 // --- SegmentStorage and Calculation Tests ---
@@ -301,7 +303,7 @@ fn segment_id_calculation_is_correct() {
     let dir = tempdir().unwrap();
     let paths = DbPaths::new(dir.path().to_path_buf());
     // Use a small, easy-to-reason-about number of ops per segment.
-    let wal = WalManager::new(paths, 10).unwrap();
+    let wal = WalManager::new(paths, NonZeroU64::new(10).unwrap()).unwrap();
 
     // Test boundaries and mid-points for various segments.
     // Segment 0: ops 1-10
@@ -315,9 +317,17 @@ fn segment_id_calculation_is_correct() {
 
     // Segment 2: ops 21-30
     assert_eq!(wal.segment_id_for_op_version(21), 2);
+}
 
-    // Edge case: op version 0 should be treated as belonging to segment 0.
-    assert_eq!(wal.segment_id_for_op_version(0), 0);
+#[test]
+#[should_panic]
+fn zero_panics() {
+    let dir = tempdir().unwrap();
+    let paths = DbPaths::new(dir.path().to_path_buf());
+    // Use a small, easy-to-reason-about number of ops per segment.
+    let wal = WalManager::new(paths, NonZeroU64::new(10).unwrap()).unwrap();
+
+    wal.segment_id_for_op_version(0);
 }
 
 #[test]

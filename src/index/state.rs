@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 
 use ahash::HashMap;
 use thiserror::Error;
@@ -17,7 +18,7 @@ pub enum IndexStateError {
 pub(crate) struct IndexState<K> {
     pub(crate) key_to_hash: BTreeMap<K, IndexStateItem>,
     pub(crate) hash_to_ref_count: HashMap<BlobHash, u32>,
-    pub(crate) last_persisted_version: Option<u64>,
+    pub(crate) last_persisted_version: Option<NonZeroU64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

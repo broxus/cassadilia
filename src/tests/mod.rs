@@ -3,6 +3,7 @@ use utils::setup_tracing;
 mod checkpoint;
 
 use std::fs;
+use std::num::NonZeroU64;
 use std::os::unix::fs::PermissionsExt;
 
 use anyhow::Result;
@@ -188,7 +189,7 @@ fn test_checkpoint_persists_index() -> Result<()> {
 
         assert!(index_file_path.exists(), "no index");
         assert!(index_file_path.metadata()?.len() > 0, "empty index");
-        assert_eq!(cas.0.index.state.read().last_persisted_version, Some(1));
+        assert_eq!(cas.0.index.state.read().last_persisted_version, NonZeroU64::new(1));
     }
 
     {
@@ -208,7 +209,7 @@ fn test_wal_rollover_and_cleanup() -> Result<()> {
     // Configure a very small WAL segment size to force rollovers.
     let config = Config {
         sync_mode: SyncMode::Sync,
-        num_ops_per_wal: 2,
+        num_ops_per_wal: NonZeroU64::new(2).unwrap(),
         pre_create_cas_dirs: false,
         ..Default::default()
     };
