@@ -29,26 +29,20 @@
 
 ## Concurrency and Locking
 
-Cassadilia uses a two-level locking strategy to ensure consistency:
+Cassadilia relies on deterministic blob paths and scoped intents to stay
+consistent.
 
-### 1. Filesystem Operations Lock (`FsLock`)
+### 1. Atomic CAS commits
 
-A single shared mutex protects CAS fs operations:
-
-- **Directory creation**: Prevents races when multiple threads create the same
-  hash prefix directory
-- **Blob commits**: Ensures atomic renames when moving staged files to
-  CAS
-- **Blob deletions**: Ensures multiple blob deletions happen atomically as a
-  group
-
-The lock is held only during filesystem metadata operations, not during index
-updates or blob content writes.
+- Parent directories are created opportunistically; repeated calls are safe.
+- Staged files are atomically renamed into place. If the CAS file already
+  exists, the staging file is dropped without touching the existing blob.
+- Concurrent commits of the same hash converge on a single CAS file. Later
+  writers drop their staging files without touching the existing blob.
 
 ### 2. Intent Tracking System
 
-We use scoped intents to prevent races between concurrent puts and
-deletes.
+We use scoped intents to prevent races between concurrent puts and deletes.
 
 - Register intent: record `key -> blob_hash` in `pending_intents` map; no
   refcount changes.
@@ -67,7 +61,6 @@ become orphans, handled by startup orphan scanning.
 
 - [x] Gather orphaned blobs on startup.
 - [x] Allow to check blobs integrity.
-- [ ] Gc empty directories
 - [ ] Cache fd-s
 - [ ] Use mmap or allow to configure read mode
 - [x] Lock index file to disallow concurrent db open

@@ -42,7 +42,6 @@ fn verify_blob_integrity(
 
 pub struct OrphanStats<K> {
     pub(crate) cas_inner: Arc<crate::CasInner<K>>,
-    pub(crate) _fs_lock: parking_lot::ArcMutexGuard<parking_lot::RawMutex, ()>,
     /// Blobs that are not referenced by any keys
     pub orphaned_blobs: Vec<BlobHash>,
     /// Files which name is not a valid blob hash
@@ -68,28 +67,40 @@ pub struct RecoveryResult {
 
 impl<K> OrphanStats<K>
 where
-    K: Clone + Eq + Ord + Hash + Debug + Send + Sync + 'static,
+    K: KeyBytes + Clone + Eq + Ord + Hash + Debug + Send + Sync + 'static,
 {
     /// Delete orphaned blobs
     pub fn delete_orphans(&self) -> Result<RecoveryResult, LibError> {
         let mut result = RecoveryResult::default();
-
-        // We already hold the fs_lock from scan time
-
         for hash in &self.orphaned_blobs {
             let blob_path = self.cas_inner.paths.cas_file_path(hash);
-            match std::fs::remove_file(&blob_path) {
-                Ok(_) => {
-                    result.orphans_deleted += 1;
-                    tracing::info!(hash = %hash, "Deleted orphaned blob");
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // Already removed by another process
+            {
+                let intents = self.cas_inner.index.pending_intents.lock();
+                let state = self.cas_inner.index.read_state();
+                let still_referenced = state.contains_blob_hash(hash);
+                let has_intent = intents.values().any(|intent_hash| intent_hash == hash);
+                drop(state);
+
+                if still_referenced || has_intent {
                     result.orphans_skipped += 1;
-                    tracing::warn!(hash = %hash, "Orphaned blob already removed by another process");
+                    continue;
                 }
-                Err(e) => {
-                    result.errors.push(format!("Failed to delete {hash}: {e}"));
+
+                match std::fs::remove_file(&blob_path) {
+                    Ok(_) => {
+                        result.orphans_deleted += 1;
+                        tracing::info!(hash = %hash, "Deleted orphaned blob");
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        result.orphans_skipped += 1;
+                        tracing::warn!(
+                            hash = %hash,
+                            "Orphaned blob already removed before cleanup"
+                        );
+                    }
+                    Err(e) => {
+                        result.errors.push(format!("Failed to delete {hash}: {e}"));
+                    }
                 }
             }
         }
@@ -130,24 +141,36 @@ where
             path: Some(quarantine_dir.to_path_buf()),
             source: e,
         })?;
-
-        // We already hold the fs_lock from scan time
-
         for hash in &self.orphaned_blobs {
             let src_path = self.cas_inner.paths.cas_file_path(hash);
             let dst_path = quarantine_dir.join(hash.to_string());
+            {
+                let intents = self.cas_inner.index.pending_intents.lock();
+                let state = self.cas_inner.index.read_state();
+                let still_referenced = state.contains_blob_hash(hash);
+                let has_intent = intents.values().any(|intent_hash| intent_hash == hash);
+                drop(state);
 
-            match std::fs::rename(&src_path, &dst_path) {
-                Ok(_) => {
-                    result.orphans_quarantined += 1;
-                    tracing::info!(hash = %hash, dest = ?dst_path, "Quarantined orphaned blob");
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // Already removed
+                if still_referenced || has_intent {
                     result.orphans_skipped += 1;
+                    continue;
                 }
-                Err(e) => {
-                    result.errors.push(format!("Failed to quarantine {hash}: {e}"));
+
+                match std::fs::rename(&src_path, &dst_path) {
+                    Ok(_) => {
+                        result.orphans_quarantined += 1;
+                        tracing::info!(
+                            hash = %hash,
+                            dest = ?dst_path,
+                            "Quarantined orphaned blob"
+                        );
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        result.orphans_skipped += 1;
+                    }
+                    Err(e) => {
+                        result.errors.push(format!("Failed to quarantine {hash}: {e}"));
+                    }
                 }
             }
         }
@@ -160,9 +183,17 @@ where
         if !self.orphaned_blobs.contains(hash) {
             return Ok(false); // Not in orphan list
         }
-
-        // We already hold the fs_lock from scan time
         let blob_path = self.cas_inner.paths.cas_file_path(hash);
+        let intents = self.cas_inner.index.pending_intents.lock();
+        let state = self.cas_inner.index.read_state();
+        let still_referenced = state.contains_blob_hash(hash);
+        let has_intent = intents.values().any(|intent_hash| intent_hash == hash);
+        drop(state);
+
+        if still_referenced || has_intent {
+            return Ok(false);
+        }
+
         match std::fs::remove_file(&blob_path) {
             Ok(_) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -188,9 +219,6 @@ where
     let mut invalid_files = Vec::new();
     let mut missing_blobs = Vec::new();
     let mut corrupted_blobs = Vec::new();
-
-    // Take the arc lock for the entire operation
-    let fs_lock = cas_inner.cas_manager.lock_arc();
 
     // Get current index state
     let index_blobs = {
@@ -301,7 +329,6 @@ where
 
     Ok(OrphanStats {
         cas_inner: cas_inner_arc,
-        _fs_lock: fs_lock,
         orphaned_blobs,
         invalid_files,
         missing_blobs,

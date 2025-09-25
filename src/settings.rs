@@ -26,6 +26,9 @@ pub enum SettingsError {
     #[error("Settings validation failed: {0}")]
     ValidationFailed(String),
 
+    #[error("Database paths must reside on the same filesystem")]
+    InvalidPaths,
+
     #[error("Atomic write failed")]
     AtomicWrite(#[from] crate::io::IoError),
 

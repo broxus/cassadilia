@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use crate::io::is_same_fs;
 use crate::types::BlobHash;
 
 #[derive(Debug, Clone)]
@@ -67,5 +68,11 @@ impl DbPaths {
 
     pub fn cas_file_path(&self, hash: &BlobHash) -> PathBuf {
         self.cas_root_path().join(hash.relative_path())
+    }
+
+    pub fn verify_all_paths_same_fs(&self) -> Result<bool, std::io::Error> {
+        let paths = [self.db_root_path(), self.cas_root_path(), self.staging_root_path()];
+
+        is_same_fs(&paths[..])
     }
 }

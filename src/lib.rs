@@ -50,6 +50,7 @@ pub enum LibIoOperation {
     ReadDir,
     RemoveFile,
     ReadContent,
+    VerifyPathsSameFs,
 }
 
 #[derive(Error, Debug)]
@@ -165,7 +166,8 @@ where
     }
 
     /// Open database and return orphan stats if scanning is enabled.
-    /// Will hold a lock on the CAS directory while `OrphanStats` is alive.
+    /// The returned stats are a snapshot; subsequent cleanup re-validates against
+    /// the live index and `pending_intents` without taking a global filesystem lock.
     pub fn open_with_recover(
         db_root: impl AsRef<Path>,
         config: Config,
@@ -173,6 +175,13 @@ where
         let inner = CasInner::new(db_root.as_ref().to_path_buf(), config.clone())?;
         let cas = Self(Arc::new(inner));
 
+        if !cas.paths.verify_all_paths_same_fs().map_err(|source| LibError::Io {
+            operation: LibIoOperation::VerifyPathsSameFs,
+            path: None,
+            source,
+        })? {
+            return Err(LibError::Settings(SettingsError::InvalidPaths));
+        }
         let orphan_stats = if config.scan_orphans_on_startup {
             let stats = orphan::scan_orphans(&cas.0, cas.0.clone(), config.verify_blob_integrity)?;
             Some(stats)
@@ -211,7 +220,6 @@ where
     K: KeyBytes + Clone + Eq + Ord + std::hash::Hash + Debug + Send + Sync + 'static,
 {
     fn new(db_root: PathBuf, config: Config) -> Result<Self, LibError> {
-        let fs_lock = FsLock::new();
         let paths = paths::DbPaths::new(db_root.clone());
 
         std::fs::create_dir_all(paths.staging_root_path()).map_err(|e| LibError::Io {
@@ -271,8 +279,7 @@ where
             }
         };
 
-        let cas_manager =
-            Arc::new(CasManager::new(paths.clone(), fs_lock.clone(), dir_tree_is_pre_created));
+        let cas_manager = Arc::new(CasManager::new(paths.clone(), dir_tree_is_pre_created));
         let index = Index::load(db_root, config.clone()).map_err(LibError::Index)?;
 
         let datasync_channel = match config.sync_mode {

@@ -3,9 +3,7 @@ use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use parking_lot::Mutex;
 use thiserror::Error;
 
 use crate::cas_manager::CasManagerError;
@@ -343,25 +341,6 @@ impl SegmentInfo {
 }
 
 // ===  Utility Types ===
-
-#[derive(Clone, Debug)]
-pub(crate) struct FsLock {
-    lock: Arc<Mutex<()>>,
-}
-
-impl FsLock {
-    pub(crate) fn new() -> Self {
-        FsLock { lock: Arc::new(Mutex::new(())) }
-    }
-
-    pub(crate) fn lock(&self) -> parking_lot::MutexGuard<'_, ()> {
-        self.lock.lock()
-    }
-
-    pub(crate) fn lock_arc(&self) -> parking_lot::ArcMutexGuard<parking_lot::RawMutex, ()> {
-        self.lock.clone().lock_arc()
-    }
-}
 
 #[cfg(test)]
 mod tests {

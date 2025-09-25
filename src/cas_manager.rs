@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::paths;
-use crate::types::{BlobHash, FsLock};
+use crate::types::BlobHash;
 
 #[derive(Debug, Clone)]
 pub enum CasIoOperation {
@@ -37,17 +37,12 @@ pub enum CasManagerError {
 
 pub struct CasManager {
     paths: paths::DbPaths,
-    fs_lock: FsLock,
     dir_tree_is_pre_created: bool,
 }
 
 impl CasManager {
-    pub fn new(paths: paths::DbPaths, fs_lock: FsLock, dir_tree_is_pre_created: bool) -> Self {
-        Self { paths, fs_lock, dir_tree_is_pre_created }
-    }
-
-    pub(crate) fn lock_arc(&self) -> parking_lot::ArcMutexGuard<parking_lot::RawMutex, ()> {
-        self.fs_lock.lock_arc()
+    pub fn new(paths: paths::DbPaths, dir_tree_is_pre_created: bool) -> Self {
+        Self { paths, dir_tree_is_pre_created }
     }
 
     pub fn read_blob(&self, blob_hash: &BlobHash) -> Result<bytes::Bytes, CasManagerError> {
@@ -144,11 +139,6 @@ impl CasManager {
         blob_hash: &BlobHash,
     ) -> Result<PathBuf, CasManagerError> {
         let final_cas_path = self.paths.cas_file_path(blob_hash);
-
-        let _lock = self.fs_lock.lock();
-
-        // Create parent directory inside the lock to prevent races
-        // Skip if directory tree was pre-created
         if !self.dir_tree_is_pre_created {
             if let Some(parent) = final_cas_path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| CasManagerError::FileOperation {
@@ -158,36 +148,40 @@ impl CasManager {
                 })?;
             }
         }
-
-        if !final_cas_path.exists() {
-            std::fs::rename(staging_path, &final_cas_path).map_err(|e| {
-                CasManagerError::FileOperation {
-                    operation: CasIoOperation::MoveStaged,
-                    path: final_cas_path.clone(),
+        match std::fs::rename(staging_path, &final_cas_path) {
+            Ok(()) => {
+                // On Unix the rename is atomic and will replace an existing file with the
+                // same hash; content-addressing guarantees identical bytes.
+                tracing::debug!(
+                    "Moved blob {} to CAS path '{}'",
+                    blob_hash,
+                    final_cas_path.display()
+                );
+                Ok(final_cas_path)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                std::fs::remove_file(staging_path).map_err(|e| CasManagerError::FileOperation {
+                    operation: CasIoOperation::RemoveStaged,
+                    path: staging_path.to_path_buf(),
                     source: e,
-                }
-            })?;
-            tracing::debug!("Moved blob {} to CAS path '{}'", blob_hash, final_cas_path.display());
-        } else {
-            tracing::debug!(
-                "Blob {} already exists at CAS path '{}', removing staged file",
-                blob_hash,
-                final_cas_path.display()
-            );
-            std::fs::remove_file(staging_path).map_err(|e| CasManagerError::FileOperation {
-                operation: CasIoOperation::RemoveStaged,
-                path: staging_path.to_path_buf(),
+                })?;
+                tracing::debug!(
+                    "Blob {} already exists at '{}', removed staging",
+                    blob_hash,
+                    final_cas_path.display()
+                );
+                Ok(final_cas_path)
+            }
+            Err(e) => Err(CasManagerError::FileOperation {
+                operation: CasIoOperation::MoveStaged,
+                path: final_cas_path,
                 source: e,
-            })?;
+            }),
         }
-
-        Ok(final_cas_path)
     }
 
     /// Delete blobs from CAS that are unreferenced
     pub fn delete_blobs(&self, hashes: &[BlobHash]) -> Result<(), CasManagerError> {
-        let _fs_lock = self.fs_lock.lock();
-
         for hash in hashes {
             let file_path = self.paths.cas_file_path(hash);
             match std::fs::remove_file(&file_path) {

@@ -270,11 +270,14 @@ where
     ) -> Result<(), IndexError> {
         let logical_op = WalOp::Put { key: key.clone(), hash, size };
         let mut intents = self.pending_intents.lock();
-        let mut state = self.state.write();
-        let mut wal = self.wal.lock();
 
-        let (mut unreferenced_from_op, _append_info, rolled_over) =
-            Self::apply_wal_op_unsafe(&mut state, &mut wal, &logical_op)?;
+        let (mut unreferenced_from_op, rolled_over) = {
+            let mut state = self.state.write();
+            let mut wal = self.wal.lock();
+            let (hashes, _append_info, rolled) =
+                Self::apply_wal_op_unsafe(&mut state, &mut wal, &logical_op)?;
+            (hashes, rolled)
+        };
 
         intents.remove(&key);
 
@@ -287,7 +290,11 @@ where
             delete_fn(&unreferenced_from_op).map_err(|e| IndexError::BlobDeletion { source: e })?;
         }
 
+        drop(intents);
+
         if rolled_over {
+            let mut state = self.state.write();
+            let mut wal = self.wal.lock();
             self.checkpoint_inner(CheckpointReason::SegmentRollover, &mut wal, &mut state)?;
         }
 
@@ -301,26 +308,29 @@ where
     ) -> Result<(), IndexError> {
         let logical_op = WalOp::Remove { keys };
         let intents = self.pending_intents.lock();
-        let mut state = self.state.write();
-        let mut wal = self.wal.lock();
 
-        let rolled_over = {
-            let (mut unreferenced_from_op, _append_info, rolled_over) =
+        let (mut unreferenced_from_op, rolled_over) = {
+            let mut state = self.state.write();
+            let mut wal = self.wal.lock();
+            let (hashes, _append_info, rolled) =
                 Self::apply_wal_op_unsafe(&mut state, &mut wal, &logical_op)?;
-
-            // Remove any unreferenced hashes that are still referenced by intents
-            unreferenced_from_op
-                .retain(|hash| !intents.values().any(|intent_hash| intent_hash == hash));
-
-            // Delete blobs BEFORE any checkpoint
-            if !unreferenced_from_op.is_empty() {
-                delete_fn(&unreferenced_from_op)
-                    .map_err(|e| IndexError::BlobDeletion { source: e })?;
-            }
-            rolled_over
+            (hashes, rolled)
         };
 
+        // Remove any unreferenced hashes that are still referenced by intents
+        unreferenced_from_op
+            .retain(|hash| !intents.values().any(|intent_hash| intent_hash == hash));
+
+        // Delete blobs BEFORE any checkpoint
+        if !unreferenced_from_op.is_empty() {
+            delete_fn(&unreferenced_from_op).map_err(|e| IndexError::BlobDeletion { source: e })?;
+        }
+
+        drop(intents);
+
         if rolled_over {
+            let mut state = self.state.write();
+            let mut wal = self.wal.lock();
             self.checkpoint_inner(CheckpointReason::SegmentRollover, &mut wal, &mut state)?;
         }
 
@@ -419,6 +429,11 @@ where
     /// Returns an iterator over known blob hashes and their reference counts.
     pub fn known_blobs(&self) -> std::collections::hash_map::Iter<'_, BlobHash, u32> {
         self.inner.hash_to_ref_count.iter()
+    }
+
+    /// Returns true if the given blob hash is currently referenced.
+    pub fn contains_blob_hash(&self, hash: &BlobHash) -> bool {
+        self.inner.hash_to_ref_count.contains_key(hash)
     }
 }
 
