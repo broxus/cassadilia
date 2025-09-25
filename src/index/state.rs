@@ -44,24 +44,41 @@ where
 
         match op {
             WalOp::Put { key, hash, size } => {
-                // if key already exists, decrement old hash ref count
-                if let Some(item) = self.key_to_hash.get(key).copied() {
-                    if let Some(unreferenced_hash) = self.decrement_ref(&item.blob_hash)? {
-                        unreferenced_hashes.push(unreferenced_hash);
+                let new_item = IndexStateItem { blob_hash: *hash, blob_size: *size };
+
+                match self.key_to_hash.insert(key.clone(), new_item) {
+                    None => {
+                        // New key → bump refcount of the new hash.
+                        self.increment_ref(hash);
+                    }
+                    Some(prev) if prev.blob_hash != *hash => {
+                        // Repoint to a different blob:
+                        // 1) decrement old, collect if it drops to zero
+                        if let Some(h) = self.decrement_ref(&prev.blob_hash)? {
+                            unreferenced_hashes.push(h);
+                        }
+                        // 2) increment new
+                        self.increment_ref(hash);
+                    }
+                    Some(prev) => {
+                        // Same blob hash: refcounts unchanged.
+                        // just a second insert of same k -> v pair, noop.
+                        // size must match for the same hash.
+                        assert_eq!(
+                            prev.blob_size, *size,
+                            "same hash but different size: prev={} new={}",
+                            prev.blob_size, size
+                        );
                     }
                 }
-
-                // insert new mapping and increment new hash ref count
-                self.key_to_hash
-                    .insert(key.clone(), IndexStateItem { blob_hash: *hash, blob_size: *size });
-                self.increment_ref(hash);
             }
+
             WalOp::Remove { keys } => {
-                // remove multiple key->hash mappings and collect unreferenced hashes
+                // Remove mappings and decrement each old blob's refcount.
                 for key in keys {
                     if let Some(item) = self.key_to_hash.remove(key) {
-                        if let Some(unreferenced_hash) = self.decrement_ref(&item.blob_hash)? {
-                            unreferenced_hashes.push(unreferenced_hash);
+                        if let Some(h) = self.decrement_ref(&item.blob_hash)? {
+                            unreferenced_hashes.push(h);
                         }
                     }
                 }

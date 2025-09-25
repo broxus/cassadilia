@@ -603,3 +603,34 @@ fn test_cleanup_disabled() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn regression_put_same_content_should_not_delete_blob() {
+    use tempfile::tempdir;
+
+    use crate::{Cas, Config};
+
+    let dir = tempdir().unwrap();
+    let cas = Cas::open(dir.path(), Config::default()).unwrap();
+
+    let key = b"same key";
+    let data = b"same content";
+
+    // First put
+    {
+        let mut tx = cas.put(*key).unwrap();
+        tx.write(data).unwrap();
+        tx.finish().unwrap();
+    }
+
+    // Second put with EXACT same bytes (same hash)
+    {
+        let mut tx = cas.put(*key).unwrap();
+        tx.write(data).unwrap();
+        tx.finish().unwrap();
+    }
+
+    let got = cas.get(key);
+    assert!(got.is_ok(), "unexpected error: {:?}", got);
+    assert_eq!(got.unwrap().unwrap(), bytes::Bytes::from_static(data));
+}
