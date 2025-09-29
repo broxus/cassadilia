@@ -36,8 +36,6 @@ mod transaction;
 use cas_manager::{CasManager, CasManagerError};
 pub use transaction::Transaction;
 
-use self::io::{FileExt, LockedFile};
-
 #[derive(Debug, Clone)]
 pub enum LibIoOperation {
     CreateLockFile,
@@ -194,8 +192,7 @@ where
 }
 
 pub struct CasInner<K> {
-    #[allow(unused)]
-    lockfile: LockedFile,
+    _lockfile: File,
     pub(crate) paths: paths::DbPaths,
     pub(crate) index: Index<K>,
     datasync_channel: Option<std::sync::mpsc::Sender<File>>,
@@ -242,9 +239,9 @@ where
                 operation: LibIoOperation::CreateLockFile,
                 path: Some(paths.lockfile_path().to_path_buf()),
                 source: e,
-            })?
-            .lock()
-            .map_err(|_e| LibError::AlreadyOpened)?;
+            })?;
+
+        lockfile.try_lock().map_err(|_e| LibError::AlreadyOpened)?;
 
         // Load or create settings
         let settings_persister = SettingsPersister::new(paths.settings_path().to_path_buf());
@@ -297,7 +294,7 @@ where
             }
         };
 
-        Ok(Self { lockfile, paths, index, datasync_channel, cas_manager })
+        Ok(Self { _lockfile: lockfile, paths, index, datasync_channel, cas_manager })
     }
 
     /// Returns a read-only view of the index state.
@@ -434,13 +431,12 @@ where
             Err(cas_error) => {
                 if let Some(io_err) =
                     cas_error.source().and_then(|s| s.downcast_ref::<std::io::Error>())
+                    && io_err.kind() == std::io::ErrorKind::NotFound
                 {
-                    if io_err.kind() == std::io::ErrorKind::NotFound {
-                        return Err(LibError::BlobDataMissing {
-                            key: format!("{key:?}"),
-                            hash: item.blob_hash,
-                        });
-                    }
+                    return Err(LibError::BlobDataMissing {
+                        key: format!("{key:?}"),
+                        hash: item.blob_hash,
+                    });
                 }
                 Err(LibError::Cas(cas_error))
             }

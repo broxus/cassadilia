@@ -17,10 +17,8 @@ fn perform_checkpoint(
         return Ok(None);
     };
 
-    if seal_current_segment {
-        if let Some(writer) = wal.active_writer.take() {
-            writer.seal()?;
-        }
+    if seal_current_segment && let Some(writer) = wal.active_writer.take() {
+        writer.seal()?;
     }
 
     wal.commit_checkpoint(version, last_checkpointed_version)?;

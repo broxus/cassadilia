@@ -357,10 +357,10 @@ where
             source: e,
         })?;
 
-        if let Ok(metadata) = entry.metadata() {
-            if metadata.is_file() {
-                staging_files.push(entry.path());
-            }
+        if let Ok(metadata) = entry.metadata()
+            && metadata.is_file()
+        {
+            staging_files.push(entry.path());
         }
     }
 

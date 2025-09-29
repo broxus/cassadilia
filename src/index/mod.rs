@@ -117,14 +117,14 @@ where
             // Revert: Remove our intent from pending_intents
             let mut intents = self.index.pending_intents.lock();
 
-            if let Some(current_hash) = intents.get(&self.key) {
-                if *current_hash == self.hash {
-                    intents.remove(&self.key);
+            if let Some(current_hash) = intents.get(&self.key)
+                && *current_hash == self.hash
+            {
+                intents.remove(&self.key);
 
-                    // If we had replaced an existing intent, restore it
-                    if let Some(replaced_hash) = self.replaced_hash {
-                        intents.insert(self.key.clone(), replaced_hash);
-                    }
+                // If we had replaced an existing intent, restore it
+                if let Some(replaced_hash) = self.replaced_hash {
+                    intents.insert(self.key.clone(), replaced_hash);
                 }
             }
         }

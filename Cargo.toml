@@ -2,7 +2,7 @@
 name = "cassadilia"
 version = "0.4.2"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.89.0"
 authors = ["0xdeafbeef"]
 description = "A content-addressable storage (CAS) system optimized for large blobs with read-mostly access patterns"
 license = "MIT OR Apache-2.0"
