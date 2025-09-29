@@ -139,14 +139,14 @@ impl CasManager {
         blob_hash: &BlobHash,
     ) -> Result<PathBuf, CasManagerError> {
         let final_cas_path = self.paths.cas_file_path(blob_hash);
-        if !self.dir_tree_is_pre_created {
-            if let Some(parent) = final_cas_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| CasManagerError::FileOperation {
-                    operation: CasIoOperation::CreateSubdir,
-                    path: final_cas_path.clone(),
-                    source: e,
-                })?;
-            }
+        if !self.dir_tree_is_pre_created
+            && let Some(parent) = final_cas_path.parent()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| CasManagerError::FileOperation {
+                operation: CasIoOperation::CreateSubdir,
+                path: final_cas_path.clone(),
+                source: e,
+            })?;
         }
         match std::fs::rename(staging_path, &final_cas_path) {
             Ok(()) => {

@@ -159,15 +159,15 @@ impl WalManager {
         last_checkpointed_version: CheckpointState,
     ) -> Result<(), WalError> {
         // Do not go backwards; allow equal (idempotent).
-        if let Some(last) = last_checkpointed_version {
-            if version <= last {
-                tracing::debug!(
-                    last_checkpointed_version = last,
-                    commit_version = version,
-                    "Skipping checkpoint commit (idempotent/no-op).",
-                );
-                return Ok(());
-            }
+        if let Some(last) = last_checkpointed_version
+            && version <= last
+        {
+            tracing::debug!(
+                last_checkpointed_version = last,
+                commit_version = version,
+                "Skipping checkpoint commit (idempotent/no-op).",
+            );
+            return Ok(());
         }
 
         // Prune segments where all operations have version <= checkpoint_version
@@ -266,10 +266,10 @@ impl WalManager {
 
 impl Drop for WalManager {
     fn drop(&mut self) {
-        if let Some(writer) = self.active_writer.take() {
-            if let Err(e) = writer.close() {
-                tracing::error!("Error closing WAL segment during drop: {:?}", e);
-            }
+        if let Some(writer) = self.active_writer.take()
+            && let Err(e) = writer.close()
+        {
+            tracing::error!("Error closing WAL segment during drop: {:?}", e);
         }
     }
 }

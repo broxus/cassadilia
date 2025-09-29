@@ -76,10 +76,10 @@ where
             WalOp::Remove { keys } => {
                 // Remove mappings and decrement each old blob's refcount.
                 for key in keys {
-                    if let Some(item) = self.key_to_hash.remove(key) {
-                        if let Some(h) = self.decrement_ref(&item.blob_hash)? {
-                            unreferenced_hashes.push(h);
-                        }
+                    if let Some(item) = self.key_to_hash.remove(key)
+                        && let Some(h) = self.decrement_ref(&item.blob_hash)?
+                    {
+                        unreferenced_hashes.push(h);
                     }
                 }
             }

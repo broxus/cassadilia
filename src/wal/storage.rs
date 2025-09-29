@@ -280,20 +280,18 @@ impl SegmentStorage {
                 source: e,
             })?;
             let path = entry.path();
-            if path.is_file() {
-                if let Some(filename_str) = path.file_name().and_then(|name| name.to_str()) {
-                    if filename_str.ends_with("_index.wal") {
-                        if let Some(id_str) = filename_str.split('_').next() {
-                            if let Ok(id) = id_str.parse::<u64>() {
-                                segments.push(SegmentInfo::new(id, path.clone()));
-                            } else {
-                                tracing::warn!(
-                                    "Found WAL-like file with non-numeric segment ID: {}",
-                                    path.display()
-                                );
-                            }
-                        }
-                    }
+            if path.is_file()
+                && let Some(filename_str) = path.file_name().and_then(|name| name.to_str())
+                && filename_str.ends_with("_index.wal")
+                && let Some(id_str) = filename_str.split('_').next()
+            {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    segments.push(SegmentInfo::new(id, path.clone()));
+                } else {
+                    tracing::warn!(
+                        "Found WAL-like file with non-numeric segment ID: {}",
+                        path.display()
+                    );
                 }
             }
         }
