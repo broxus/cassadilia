@@ -29,7 +29,7 @@ pub enum SettingsError {
     #[error("Database paths must reside on the same filesystem")]
     InvalidPaths,
 
-    #[error("Atomic write failed")]
+    #[error(transparent)]
     AtomicWrite(#[from] crate::io::IoError),
 
     #[error("Unsupported database version: {found}, expected: {expected}")]

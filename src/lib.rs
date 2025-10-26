@@ -53,7 +53,10 @@ pub enum LibIoOperation {
 
 #[derive(Error, Debug)]
 pub enum LibError {
-    #[error("IO operation failed: {operation:?} at path {}", path.as_ref().map_or("unknown".to_string(), |p| p.display().to_string()))]
+    #[error(
+        "IO operation failed: {operation:?} at path {}",
+        path.as_ref().map_or("unknown".to_string(), |p| p.display().to_string())
+    )]
     Io {
         operation: LibIoOperation,
         path: Option<PathBuf>,
@@ -64,25 +67,25 @@ pub enum LibError {
     #[error("Db instance is already in use")]
     AlreadyOpened,
 
-    #[error("CAS operation failed")]
-    Cas(CasManagerError),
+    #[error(transparent)]
+    Cas(#[from] CasManagerError),
 
     #[error("Blob data missing for key {key} with hash {hash}")]
     BlobDataMissing { key: String, hash: BlobHash },
 
     #[error("Transaction commit: fdatasync send failed")]
-    CommitFdatasyncSend(std::sync::mpsc::SendError<File>),
+    CommitFdatasyncSend(#[source] std::sync::mpsc::SendError<File>),
     #[error("Transaction commit: fdatasync IO failed")]
     CommitFdatasyncIo(#[source] std::io::Error),
 
-    #[error("Index operation failed")]
-    Index(IndexError),
+    #[error(transparent)]
+    Index(#[from] IndexError),
 
-    #[error("Settings error")]
-    Settings(SettingsError),
+    #[error(transparent)]
+    Settings(#[from] SettingsError),
 
-    #[error("Types error")]
-    TypesError(TypesError),
+    #[error(transparent)]
+    TypesError(#[from] TypesError),
 
     #[error("Integrity check failed: {missing} missing blobs, {corrupted} corrupted blobs")]
     IntegrityCheckFailed {

@@ -36,7 +36,7 @@ impl std::fmt::Display for IndexIoOperation {
 
 #[derive(Error, Debug)]
 pub enum IndexError {
-    #[error("Index persister error")]
+    #[error(transparent)]
     PersistFailed(#[from] PersisterError),
 
     #[error("Key not found: {key}")]
@@ -51,7 +51,7 @@ pub enum IndexError {
     #[error("Initialization: Failed to create WAL manager")]
     InitCreateWalManager(#[source] WalError),
 
-    #[error("WAL operation failed")]
+    #[error(transparent)]
     Wal(#[from] WalError),
 
     #[error("ApplyWalOp: Failed to serialize WalOpRaw")]
