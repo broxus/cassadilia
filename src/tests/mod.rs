@@ -124,6 +124,108 @@ fn test_overwrite_persists_across_reopen() -> Result<()> {
 }
 
 #[test]
+fn test_stats_unique_and_bytes_shared_blob() -> Result<()> {
+    setup_tracing();
+    let dir = tempdir()?;
+    let cas = Cas::open(dir.path(), Config::default())?;
+
+    let data = b"abc";
+    let size = data.len() as u64;
+    let key1 = "key1".to_string();
+    let key2 = "key2".to_string();
+
+    let mut tx = cas.put(key1.clone())?;
+    tx.write(data)?;
+    tx.finish()?;
+
+    let stats = cas.stats();
+    assert_eq!(stats.cas.unique_blobs, 1);
+    assert_eq!(stats.cas.total_bytes, size);
+
+    let mut tx = cas.put(key2.clone())?;
+    tx.write(data)?;
+    tx.finish()?;
+
+    let stats = cas.stats();
+    assert_eq!(stats.cas.unique_blobs, 1);
+    assert_eq!(stats.cas.total_bytes, size);
+
+    assert!(cas.remove(&key1)?);
+    let stats = cas.stats();
+    assert_eq!(stats.cas.unique_blobs, 1);
+    assert_eq!(stats.cas.total_bytes, size);
+
+    assert!(cas.remove(&key2)?);
+    let stats = cas.stats();
+    assert_eq!(stats.cas.unique_blobs, 0);
+    assert_eq!(stats.cas.total_bytes, 0);
+
+    Ok(())
+}
+
+#[test]
+fn test_stats_repoint_overwrite_updates_bytes() -> Result<()> {
+    setup_tracing();
+    let dir = tempdir()?;
+    let cas = Cas::open(dir.path(), Config::default())?;
+
+    let key = "key".to_string();
+    let data_a = b"a";
+    let data_b = b"bbbbb";
+
+    let mut tx = cas.put(key.clone())?;
+    tx.write(data_a)?;
+    tx.finish()?;
+
+    let stats = cas.stats();
+    assert_eq!(stats.cas.unique_blobs, 1);
+    assert_eq!(stats.cas.total_bytes, data_a.len() as u64);
+
+    let mut tx = cas.put(key.clone())?;
+    tx.write(data_b)?;
+    tx.finish()?;
+
+    let stats = cas.stats();
+    assert_eq!(stats.cas.unique_blobs, 1);
+    assert_eq!(stats.cas.total_bytes, data_b.len() as u64);
+
+    Ok(())
+}
+
+#[test]
+fn test_stats_recomputed_after_reopen() -> Result<()> {
+    setup_tracing();
+    let dir = tempdir()?;
+    let db_path = dir.path();
+
+    {
+        let cas = Cas::open(db_path, Config::default())?;
+        let data = b"abc";
+
+        let mut tx = cas.put("k1".to_string())?;
+        tx.write(data)?;
+        tx.finish()?;
+
+        let mut tx = cas.put("k2".to_string())?;
+        tx.write(data)?;
+        tx.finish()?;
+
+        let stats = cas.stats();
+        assert_eq!(stats.cas.unique_blobs, 1);
+        assert_eq!(stats.cas.total_bytes, data.len() as u64);
+    }
+
+    {
+        let cas = Cas::<String>::open(db_path, Config::default())?;
+        let stats = cas.stats();
+        assert_eq!(stats.cas.unique_blobs, 1);
+        assert_eq!(stats.cas.total_bytes, 3);
+    }
+
+    Ok(())
+}
+
+#[test]
 fn test_remove_persists_across_reopen() -> Result<()> {
     setup_tracing();
     let dir = tempdir()?;

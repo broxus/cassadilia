@@ -98,6 +98,28 @@ fn test_checkpoint_persists_overwrites_correctly() -> Result<()> {
 }
 
 #[test]
+fn test_stats_index_size_on_checkpoint() -> Result<()> {
+    setup_tracing();
+    let harness = CasTestHarness::new(Config::default())?;
+    let db_path = harness.db_path().to_path_buf();
+
+    harness.run_session(|cas| {
+        let mut tx = cas.put("key".to_string())?;
+        tx.write(b"data")?;
+        tx.finish()?;
+
+        cas.checkpoint()?;
+
+        let stats = cas.stats();
+        let len = db_path.join("index").metadata()?.len();
+        assert_eq!(stats.index.serialized_size_bytes, len);
+        Ok(())
+    })?;
+
+    Ok(())
+}
+
+#[test]
 fn test_checkpoint_prevents_double_replay() -> Result<()> {
     setup_tracing();
     let harness = CasTestHarness::new(Config {

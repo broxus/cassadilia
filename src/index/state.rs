@@ -4,7 +4,7 @@ use std::num::NonZeroU64;
 use ahash::HashMap;
 use thiserror::Error;
 
-use crate::types::{BlobHash, WalOp};
+use crate::types::{BlobHash, DbStats, WalOp};
 
 #[derive(Error, Debug)]
 pub enum IndexStateError {
@@ -19,6 +19,7 @@ pub(crate) struct IndexState<K> {
     pub(crate) key_to_hash: BTreeMap<K, IndexStateItem>,
     pub(crate) hash_to_ref_count: HashMap<BlobHash, u32>,
     pub(crate) last_persisted_version: Option<NonZeroU64>,
+    pub(crate) stats: DbStats,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +37,24 @@ where
             key_to_hash: BTreeMap::new(),
             hash_to_ref_count: HashMap::default(),
             last_persisted_version: None,
+            stats: DbStats::default(),
         }
+    }
+
+    pub fn recompute_stats(&mut self, index_file_size_bytes: u64) {
+        let mut unique =
+            HashMap::with_capacity_and_hasher(self.hash_to_ref_count.len(), Default::default());
+
+        for item in self.key_to_hash.values() {
+            unique.entry(item.blob_hash).or_insert(item.blob_size);
+        }
+
+        let unique_blobs = unique.len() as u64;
+        let total_bytes = unique.values().copied().sum::<u64>();
+
+        self.stats.cas.unique_blobs = unique_blobs;
+        self.stats.cas.total_bytes = total_bytes;
+        self.stats.index.serialized_size_bytes = index_file_size_bytes;
     }
 
     pub fn apply_logical_op(&mut self, op: &WalOp<K>) -> Result<Vec<BlobHash>, IndexStateError> {
@@ -49,16 +67,25 @@ where
                 match self.key_to_hash.insert(key.clone(), new_item) {
                     None => {
                         // New key → bump refcount of the new hash.
-                        self.increment_ref(hash);
+                        if self.increment_ref(hash) {
+                            self.stats.cas.unique_blobs += 1;
+                            self.stats.cas.total_bytes += *size;
+                        }
                     }
                     Some(prev) if prev.blob_hash != *hash => {
                         // Repoint to a different blob:
                         // 1) decrement old, collect if it drops to zero
                         if let Some(h) = self.decrement_ref(&prev.blob_hash)? {
                             unreferenced_hashes.push(h);
+                            self.stats.cas.unique_blobs -= 1;
+                            self.stats.cas.total_bytes -= prev.blob_size;
                         }
+
                         // 2) increment new
-                        self.increment_ref(hash);
+                        if self.increment_ref(hash) {
+                            self.stats.cas.unique_blobs += 1;
+                            self.stats.cas.total_bytes += *size;
+                        }
                     }
                     Some(prev) => {
                         // Same blob hash: refcounts unchanged.
@@ -80,6 +107,8 @@ where
                         && let Some(h) = self.decrement_ref(&item.blob_hash)?
                     {
                         unreferenced_hashes.push(h);
+                        self.stats.cas.unique_blobs -= 1;
+                        self.stats.cas.total_bytes -= item.blob_size;
                     }
                 }
             }
@@ -88,8 +117,11 @@ where
         Ok(unreferenced_hashes)
     }
 
-    pub(crate) fn increment_ref(&mut self, hash: &BlobHash) {
-        *self.hash_to_ref_count.entry(*hash).or_default() += 1;
+    pub(crate) fn increment_ref(&mut self, hash: &BlobHash) -> bool {
+        let entry = self.hash_to_ref_count.entry(*hash).or_default();
+        let was_zero = *entry == 0;
+        *entry += 1;
+        was_zero
     }
 
     pub(crate) fn decrement_ref(

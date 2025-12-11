@@ -96,6 +96,7 @@ pub enum LibError {
     },
 }
 
+#[must_use]
 pub fn calculate_blob_hash(blob_data: &[u8]) -> BlobHash {
     BlobHash(blake3::hash(blob_data).into())
 }
@@ -191,6 +192,16 @@ where
         };
 
         Ok((cas, orphan_stats))
+    }
+
+    /// Returns how many space the database occupies on disk.
+    /// # NOTE:
+    /// It does not include the size of dir in cas
+    /// So it can be around 256 * 256(l1) * 256(l2) bytes depending on the number of directories
+    /// created and fs used.
+    #[must_use]
+    pub fn stats(&self) -> DbStats {
+        self.0.stats()
     }
 }
 
@@ -304,6 +315,11 @@ where
     /// The returned guard holds a shared read lock until dropped.
     pub fn read_index_state(&self) -> IndexReadGuard<'_, K> {
         self.index.read_state()
+    }
+
+    #[must_use]
+    pub fn stats(&self) -> DbStats {
+        self.index.read_state().stats()
     }
 
     /// Start a new transaction for the given key.

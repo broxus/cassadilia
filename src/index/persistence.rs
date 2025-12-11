@@ -62,7 +62,7 @@ impl<'a> IndexStatePersister<'a> {
         Ok(state)
     }
 
-    pub fn save<K>(&self, state: &IndexState<K>) -> Result<(), PersisterError>
+    pub fn save<K>(&self, state: &IndexState<K>) -> Result<u64, PersisterError>
     where
         K: KeyBytes + Clone + Eq + Ord + Debug + Send + Sync + 'static,
     {
@@ -70,6 +70,7 @@ impl<'a> IndexStatePersister<'a> {
         let index_tmp_path = self.paths.index_tmp_path();
 
         let data_bytes = serialize_index_state(&state.key_to_hash, state.last_persisted_version);
+        let len = data_bytes.len() as u64;
 
         atomically_write_file_bytes(index_path, index_tmp_path, &data_bytes)?;
 
@@ -78,7 +79,7 @@ impl<'a> IndexStatePersister<'a> {
             state.key_to_hash.len(),
             index_path.display()
         );
-        Ok(())
+        Ok(len)
     }
 }
 
