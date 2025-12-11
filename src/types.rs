@@ -10,14 +10,33 @@ use crate::cas_manager::CasManagerError;
 
 pub const HASH_SIZE: usize = blake3::OUT_LEN;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CasStats {
+    pub unique_blobs: u64,
+    pub total_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IndexStats {
+    pub serialized_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DbStats {
+    pub cas: CasStats,
+    pub index: IndexStats,
+}
+
 #[derive(Clone, Copy, Eq, Ord, PartialOrd)]
 pub struct BlobHash(pub [u8; HASH_SIZE]);
 
 impl BlobHash {
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8; HASH_SIZE] {
         &self.0
     }
 
+    #[must_use]
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
@@ -30,6 +49,7 @@ impl BlobHash {
 
     /// Returns the relative path for this blob hash, suitable for storing in a directory structure.
     /// The path will have 2 levels /h/a/sh
+    #[must_use]
     pub fn relative_path(&self) -> PathBuf {
         let hex = self.to_hex();
         let top_level_dir = &hex[0..2];
@@ -61,6 +81,7 @@ impl BlobHash {
         Ok(Self(res))
     }
 
+    #[must_use]
     pub fn from_bytes(bytes: [u8; HASH_SIZE]) -> Self {
         Self(bytes)
     }

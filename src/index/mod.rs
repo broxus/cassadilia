@@ -13,7 +13,7 @@ use thiserror::Error;
 
 pub use self::state::IndexStateItem;
 use crate::paths::DbPaths;
-use crate::types::{BlobHash, CheckpointReason, Config, KeyBytes, WalOp};
+use crate::types::{BlobHash, CheckpointReason, Config, DbStats, KeyBytes, WalOp};
 use crate::wal::{WalError, WalManager};
 
 mod persistence;
@@ -149,7 +149,11 @@ where
             .map_err(IndexError::InitCreateWalManager)?;
 
         let persister = IndexStatePersister::new(&paths);
-        let state = persister.load()?;
+        let mut state = persister.load()?;
+
+        let index_file_size =
+            std::fs::metadata(paths.index_file_path()).map(|m| m.len()).unwrap_or(0);
+        state.recompute_stats(index_file_size);
 
         let checkpoint_version = state.last_persisted_version;
         let state = Arc::new(RwLock::new(state));
@@ -157,7 +161,8 @@ where
         let mut replayed_count = 0u64;
         wal_manager.replay_and_prepare(checkpoint_version, |op| {
             replayed_count += 1;
-            let _ = state.write().apply_logical_op(&op).expect("Index is corrupted");
+            let mut guard = state.write();
+            let _ = guard.apply_logical_op(&op).expect("Index is corrupted");
         })?;
 
         let index = Self {
@@ -209,7 +214,8 @@ where
         // 2. Set the version we're about to persist
         snapshot.last_persisted_version = Some(target_version);
 
-        IndexStatePersister::new(&self.paths).save(snapshot)?;
+        let serialized_len = IndexStatePersister::new(&self.paths).save(snapshot)?;
+        snapshot.stats.index.serialized_size_bytes = serialized_len;
         // 3. Prune segments up to the target
         wal_guard
             .commit_checkpoint(target_version, current_checkpoint)
@@ -412,28 +418,38 @@ where
 
     /// Returns a snapshot of the current key map.
     /// Calls `clone` inside.
+    #[must_use]
     pub fn keys_snapshot(&self) -> BTreeMap<K, IndexStateItem> {
         self.inner.key_to_hash.clone()
     }
 
     /// Returns the number of keys in the index.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.inner.key_to_hash.len()
     }
 
     /// Returns `true` if the index contains no keys.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.inner.key_to_hash.is_empty()
     }
 
     /// Returns an iterator over known blob hashes and their reference counts.
+    #[must_use]
     pub fn known_blobs(&self) -> std::collections::hash_map::Iter<'_, BlobHash, u32> {
         self.inner.hash_to_ref_count.iter()
     }
 
     /// Returns true if the given blob hash is currently referenced.
+    #[must_use]
     pub fn contains_blob_hash(&self, hash: &BlobHash) -> bool {
         self.inner.hash_to_ref_count.contains_key(hash)
+    }
+
+    #[must_use]
+    pub fn stats(&self) -> DbStats {
+        self.inner.stats
     }
 }
 
