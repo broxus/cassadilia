@@ -442,6 +442,11 @@ where
         self.index.checkpoint(CheckpointReason::Explicit).map_err(LibError::Index)
     }
 
+    /// Returns root path of db provided at initialization
+    pub fn root_path(&self) -> &Path {
+        self.paths.db_root_path()
+    }
+
     fn with_blob_item<T, F>(&self, key: &K, f: F) -> Result<Option<T>, LibError>
     where
         F: FnOnce(&IndexStateItem) -> Result<T, CasManagerError>,
