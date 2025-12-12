@@ -25,6 +25,23 @@ pub enum SerializationError {
     InvalidVariantTag { tag: u8, enum_name: &'static str, parsing_context: &'static str },
 }
 
+#[inline]
+fn take_bytes<'a>(
+    bytes: &mut &'a [u8],
+    len: usize,
+    entity: &'static str,
+    parsing_context: &'static str,
+) -> Result<&'a [u8], SerializationError> {
+    let (head, rest) = bytes.split_at_checked(len).ok_or(SerializationError::InsufficientData {
+        entity,
+        expected: len,
+        found: bytes.len(),
+        parsing_context,
+    })?;
+    *bytes = rest;
+    Ok(head)
+}
+
 /// serialize `BTreeMap`<Vec<u8>, `IndexStateItem`> using hand-rolled format
 /// format: [u64 `last_persisted_version`][u32 `num_entries`][[u32
 /// `key_len`][key_bytes][`32_bytes_hash`][u64 `blob_size`]]...
@@ -180,42 +197,26 @@ pub(crate) fn deserialize_wal_op_raw(bytes: &[u8]) -> Result<WalOpRaw, Serializa
 // helper functions for reading from byte slices
 #[inline]
 fn read_u8(bytes: &mut &[u8], parsing_context: &'static str) -> Result<u8, SerializationError> {
-    if bytes.is_empty() {
-        return Err(SerializationError::UnexpectedEof { parsing_context });
-    }
-    let value = bytes[0];
-    *bytes = &bytes[1..];
-    Ok(value)
+    let (value, rest) =
+        bytes.split_first().ok_or(SerializationError::UnexpectedEof { parsing_context })?;
+    *bytes = rest;
+    Ok(*value)
 }
 
 #[inline]
 fn read_u32(bytes: &mut &[u8], parsing_context: &'static str) -> Result<u32, SerializationError> {
-    if bytes.len() < 4 {
-        return Err(SerializationError::InsufficientData {
-            entity: "u32",
-            expected: 4,
-            found: bytes.len(),
-            parsing_context,
-        });
-    }
-    let value = u32::from_le_bytes(bytes[..4].try_into().unwrap());
-    *bytes = &bytes[4..];
-    Ok(value)
+    let head = take_bytes(bytes, 4, "u32", parsing_context)?;
+    let mut array = [0u8; 4];
+    array.copy_from_slice(head);
+    Ok(u32::from_le_bytes(array))
 }
 
 #[inline]
 fn read_u64(bytes: &mut &[u8], parsing_context: &'static str) -> Result<u64, SerializationError> {
-    if bytes.len() < 8 {
-        return Err(SerializationError::InsufficientData {
-            entity: "u64",
-            expected: 8,
-            found: bytes.len(),
-            parsing_context,
-        });
-    }
-    let value = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-    *bytes = &bytes[8..];
-    Ok(value)
+    let head = take_bytes(bytes, 8, "u64", parsing_context)?;
+    let mut array = [0u8; 8];
+    array.copy_from_slice(head);
+    Ok(u64::from_le_bytes(array))
 }
 
 #[inline]
@@ -223,16 +224,9 @@ fn read_fixed_bytes<const N: usize>(
     bytes: &mut &[u8],
     parsing_context: &'static str,
 ) -> Result<[u8; N], SerializationError> {
-    if bytes.len() < N {
-        return Err(SerializationError::InsufficientData {
-            entity: "fixed bytes",
-            expected: N,
-            found: bytes.len(),
-            parsing_context,
-        });
-    }
-    let array: [u8; N] = bytes[..N].try_into().unwrap();
-    *bytes = &bytes[N..];
+    let head = take_bytes(bytes, N, "fixed bytes", parsing_context)?;
+    let mut array = [0u8; N];
+    array.copy_from_slice(head);
     Ok(array)
 }
 
@@ -242,17 +236,8 @@ fn read_bytes_with_len(
     parsing_context: &'static str,
 ) -> Result<Vec<u8>, SerializationError> {
     let len = read_u32(bytes, parsing_context)? as usize;
-    if bytes.len() < len {
-        return Err(SerializationError::InsufficientData {
-            entity: "variable-length bytes",
-            expected: len,
-            found: bytes.len(),
-            parsing_context,
-        });
-    }
-    let data = bytes[..len].to_vec();
-    *bytes = &bytes[len..];
-    Ok(data)
+    let data = take_bytes(bytes, len, "variable-length bytes", parsing_context)?;
+    Ok(data.to_vec())
 }
 
 #[cfg(test)]
@@ -391,8 +376,10 @@ mod tests {
 
         match deserialized {
             WalOpRaw::Remove { keys_bytes } => {
-                assert_eq!(keys_bytes.len(), 1);
-                assert_eq!(keys_bytes[0], b"");
+                let [only] = keys_bytes.as_slice() else {
+                    panic!("Expected a single key");
+                };
+                assert_eq!(only.as_slice(), b"");
             }
             WalOpRaw::Put { .. } => panic!("Wrong variant"),
         }
@@ -414,10 +401,12 @@ mod tests {
 
         match deserialized {
             WalOpRaw::Remove { keys_bytes } => {
-                assert_eq!(keys_bytes.len(), 3);
-                assert_eq!(keys_bytes[0], b"");
-                assert_eq!(keys_bytes[1], b"hello");
-                assert_eq!(keys_bytes[2], large_key);
+                let [first, second, third] = keys_bytes.as_slice() else {
+                    panic!("Expected three keys");
+                };
+                assert_eq!(first.as_slice(), b"");
+                assert_eq!(second.as_slice(), b"hello");
+                assert_eq!(third, &large_key);
             }
             WalOpRaw::Put { .. } => panic!("Wrong variant"),
         }

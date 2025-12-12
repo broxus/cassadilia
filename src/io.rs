@@ -65,13 +65,14 @@ pub enum IoError {
 
 #[cfg(target_os = "linux")]
 pub fn is_same_fs(paths: &[&Path]) -> Result<bool, io::Error> {
-    if paths.len() < 2 {
-        return Ok(true);
-    }
+    let (first, rest) = match paths {
+        [] | [_] => return Ok(true),
+        [first, rest @ ..] => (*first, rest),
+    };
 
     // Try mount-ids first.
-    if let Some(first_mid) = mount_id_statx(paths[0])? {
-        for p in paths.iter().skip(1) {
+    if let Some(first_mid) = mount_id_statx(first)? {
+        for p in rest {
             match mount_id_statx(p) {
                 Ok(Some(mid)) if mid == first_mid => {}
                 Ok(Some(_)) => return Ok(false),
@@ -94,13 +95,14 @@ pub fn is_same_fs(paths: &[&std::path::Path]) -> Result<bool, io::Error> {
 pub fn same_fs_dev(paths: &[&Path]) -> Result<bool, io::Error> {
     use std::os::unix::fs::MetadataExt;
 
-    if paths.len() < 2 {
-        return Ok(true);
-    }
+    let (first, rest) = match paths {
+        [] | [_] => return Ok(true),
+        [first, rest @ ..] => (*first, rest),
+    };
 
-    let first_dev = std::fs::metadata(paths[0])?.dev();
+    let first_dev = std::fs::metadata(first)?.dev();
 
-    for path in paths.iter().skip(1) {
+    for path in rest {
         if std::fs::metadata(path)?.dev() != first_dev {
             return Ok(false);
         }

@@ -119,8 +119,11 @@ mod tests {
             // Verify structure: 2 levels, 256 each
             let structure = analyze_directory_structure(&cas_root)?;
             assert_eq!(structure.depth, 2, "depth != 2");
-            assert_eq!(structure.dirs_per_level[0], 256, "need 256 top-level");
-            assert_eq!(structure.dirs_per_level[1], 65536, "need 65,536 second-level");
+            let [top_level, second_level, ..] = structure.dirs_per_level.as_slice() else {
+                panic!("Expected at least two directory levels");
+            };
+            assert_eq!(*top_level, 256, "need 256 top-level");
+            assert_eq!(*second_level, 65536, "need 65,536 second-level");
 
             // Write a blob to verify it works
             let mut tx = cas.put("test_key".to_string())?;

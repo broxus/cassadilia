@@ -182,7 +182,10 @@ pub mod directory_helpers {
                 }
             }
 
-            dirs_per_level[level] += dir_count;
+            let Some(count) = dirs_per_level.get_mut(level) else {
+                return Err(anyhow::anyhow!("missing level {level} in dirs_per_level"));
+            };
+            *count += dir_count;
             Ok(())
         }
 

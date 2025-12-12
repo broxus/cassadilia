@@ -291,9 +291,11 @@ fn discover_segments_ignores_malformed_filenames() {
     let segments = storage.discover_segments().unwrap();
 
     // Should only discover the two validly named segments.
-    assert_eq!(segments.len(), 2);
-    assert_eq!(segments[0].id, 0);
-    assert_eq!(segments[1].id, 2);
+    let [first, second] = segments.as_slice() else {
+        panic!("Expected two discovered segments");
+    };
+    assert_eq!(first.id, 0);
+    assert_eq!(second.id, 2);
 }
 
 #[test]

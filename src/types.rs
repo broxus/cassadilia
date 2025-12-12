@@ -64,13 +64,12 @@ impl BlobHash {
 
     pub fn from_relative_path(path: &Path) -> Result<Self, TypesError> {
         let components: Vec<_> = path.components().collect();
-        if components.len() < 3 {
+        let [.., first, second, third] = components.as_slice() else {
             return Err(TypesError::InvalidHashFormat(hex::FromHexError::InvalidStringLength));
-        }
-        let last_3 = &components[components.len() - 3..];
+        };
         let mut buf = Vec::with_capacity(HASH_SIZE * 2);
 
-        for component in last_3.iter() {
+        for component in [first, second, third] {
             let component = component.as_os_str().as_encoded_bytes();
             buf.extend_from_slice(component);
         }
@@ -444,10 +443,15 @@ mod tests {
         let components: Vec<_> =
             path.components().map(|c| c.as_os_str().to_str().unwrap()).collect();
 
-        assert_eq!(components.len(), 3);
-        assert_eq!(components[0], "12");
-        assert_eq!(components[1], "34");
-        assert_eq!(components[2], "567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+        let [first, second, third] = components.as_slice() else {
+            panic!("Expected three path components");
+        };
+        assert_eq!(*first, "12");
+        assert_eq!(*second, "34");
+        assert_eq!(
+            *third,
+            "567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        );
     }
 
     #[test]

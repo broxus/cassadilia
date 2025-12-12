@@ -425,14 +425,13 @@ fn test_io_error_on_staging_file_creation() -> anyhow::Result<()> {
     let result = cas.put("test_key".to_string());
     assert!(result.is_err());
 
-    match result.unwrap_err() {
-        LibError::Io { operation, path, .. } => {
-            assert!(matches!(operation, LibIoOperation::CreateStagingFile));
-            let path_str = path.unwrap().to_string_lossy().to_string();
-            assert!(path_str.contains("staging"));
-        }
-        other_error => panic!("Expected a specific IO error, but got: {other_error}",),
-    }
+    let err = result.unwrap_err();
+    let LibError::Io { operation, path, .. } = err else {
+        panic!("Expected a specific IO error, but got: {err}");
+    };
+    assert!(matches!(operation, LibIoOperation::CreateStagingFile));
+    let path_str = path.unwrap().to_string_lossy().to_string();
+    assert!(path_str.contains("staging"));
 
     Ok(())
 }
@@ -483,8 +482,10 @@ fn test_orphan_detection_and_cleanup() -> Result<()> {
 
     // Should have orphan stats
     let stats = orphan_stats.expect("Should have orphan stats");
-    assert_eq!(stats.orphaned_blobs.len(), 1);
-    assert_eq!(stats.orphaned_blobs[0], orphan_hash);
+    let [only] = stats.orphaned_blobs.as_slice() else {
+        panic!("Expected one orphaned blob");
+    };
+    assert_eq!(*only, orphan_hash);
     assert_eq!(stats.invalid_files.len(), 1);
 
     // Valid blob should still exist
@@ -541,8 +542,10 @@ fn test_orphan_detection_with_integrity_check() -> Result<()> {
     // Should fail due to corrupted blob
     match result {
         Err(LibError::IntegrityCheckFailed { corrupted_blobs, .. }) => {
-            assert_eq!(corrupted_blobs.len(), 1);
-            assert_eq!(corrupted_blobs[0], item.blob_hash);
+            let [only] = corrupted_blobs.as_slice() else {
+                panic!("Expected one corrupted blob");
+            };
+            assert_eq!(*only, item.blob_hash);
         }
         _ => panic!("Expected IntegrityCheckFailed error"),
     }
@@ -584,8 +587,10 @@ fn test_orphan_detection_with_missing_blobs() -> Result<()> {
     // Should fail due to missing blob
     match result {
         Err(LibError::IntegrityCheckFailed { missing_blobs, .. }) => {
-            assert_eq!(missing_blobs.len(), 1);
-            assert_eq!(missing_blobs[0], item1.blob_hash);
+            let [only] = missing_blobs.as_slice() else {
+                panic!("Expected one missing blob");
+            };
+            assert_eq!(*only, item1.blob_hash);
         }
         _ => panic!("Expected IntegrityCheckFailed error"),
     }
