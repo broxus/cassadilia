@@ -448,10 +448,7 @@ mod tests {
         };
         assert_eq!(*first, "12");
         assert_eq!(*second, "34");
-        assert_eq!(
-            *third,
-            "567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-        );
+        assert_eq!(*third, "567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
     }
 
     #[test]

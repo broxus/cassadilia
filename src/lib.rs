@@ -203,6 +203,11 @@ where
     pub fn stats(&self) -> DbStats {
         self.0.stats()
     }
+
+    #[must_use]
+    pub fn as_arc(&self) -> &Arc<CasInner<K>> {
+        &self.0
+    }
 }
 
 pub struct CasInner<K> {
