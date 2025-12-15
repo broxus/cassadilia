@@ -65,10 +65,7 @@ pub struct RecoveryResult {
     pub errors: Vec<String>,
 }
 
-impl<K> OrphanStats<K>
-where
-    K: KeyBytes + Clone + Eq + Ord + Hash + Debug + Send + Sync + 'static,
-{
+impl<K> OrphanStats<K> {
     /// Delete orphaned blobs
     pub fn delete_orphans(&self) -> Result<RecoveryResult, LibError> {
         let mut result = RecoveryResult::default();

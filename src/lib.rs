@@ -129,6 +129,23 @@ impl<K> Deref for Cas<K> {
     }
 }
 
+impl<K> Cas<K> {
+    /// Returns how many space the database occupies on disk.
+    /// # NOTE:
+    /// It does not include the size of dir in cas
+    /// So it can be around 256 * 256(l1) * 256(l2) bytes depending on the number of directories
+    /// created and fs used.
+    #[must_use]
+    pub fn stats(&self) -> DbStats {
+        self.0.stats()
+    }
+
+    #[must_use]
+    pub fn as_arc(&self) -> &Arc<CasInner<K>> {
+        &self.0
+    }
+}
+
 impl<K> Cas<K>
 where
     K: KeyBytes + Clone + Eq + Ord + std::hash::Hash + Debug + Send + Sync + 'static,
@@ -192,21 +209,6 @@ where
         };
 
         Ok((cas, orphan_stats))
-    }
-
-    /// Returns how many space the database occupies on disk.
-    /// # NOTE:
-    /// It does not include the size of dir in cas
-    /// So it can be around 256 * 256(l1) * 256(l2) bytes depending on the number of directories
-    /// created and fs used.
-    #[must_use]
-    pub fn stats(&self) -> DbStats {
-        self.0.stats()
-    }
-
-    #[must_use]
-    pub fn as_arc(&self) -> &Arc<CasInner<K>> {
-        &self.0
     }
 }
 
@@ -314,17 +316,6 @@ where
         };
 
         Ok(Self { _lockfile: lockfile, paths, index, datasync_channel, cas_manager })
-    }
-
-    /// Returns a read-only view of the index state.
-    /// The returned guard holds a shared read lock until dropped.
-    pub fn read_index_state(&self) -> IndexReadGuard<'_, K> {
-        self.index.read_state()
-    }
-
-    #[must_use]
-    pub fn stats(&self) -> DbStats {
-        self.index.read_state().stats()
     }
 
     /// Start a new transaction for the given key.
@@ -442,11 +433,6 @@ where
         self.index.checkpoint(CheckpointReason::Explicit).map_err(LibError::Index)
     }
 
-    /// Returns root path of db provided at initialization
-    pub fn root_path(&self) -> &Path {
-        self.paths.db_root_path()
-    }
-
     fn with_blob_item<T, F>(&self, key: &K, f: F) -> Result<Option<T>, LibError>
     where
         F: FnOnce(&IndexStateItem) -> Result<T, CasManagerError>,
@@ -470,6 +456,24 @@ where
                 Err(LibError::Cas(cas_error))
             }
         }
+    }
+}
+
+impl<K> CasInner<K> {
+    /// Returns a read-only view of the index state.
+    /// The returned guard holds a shared read lock until dropped.
+    pub fn read_index_state(&self) -> IndexReadGuard<'_, K> {
+        self.index.read_state()
+    }
+
+    /// Returns root path of db provided at initialization
+    pub fn root_path(&self) -> &Path {
+        self.paths.db_root_path()
+    }
+
+    #[must_use]
+    pub fn stats(&self) -> DbStats {
+        self.index.read_state().stats()
     }
 
     fn fdatasync(&self, file: File) -> Result<(), LibError> {
