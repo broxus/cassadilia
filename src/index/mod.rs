@@ -180,10 +180,6 @@ where
         Ok(index)
     }
 
-    pub fn read_state(&self) -> IndexReadGuard<'_, K> {
-        IndexReadGuard { inner: self.state.read() }
-    }
-
     pub fn checkpoint(&self, reason: CheckpointReason) -> Result<(), IndexError> {
         tracing::info!(?reason, "Starting checkpoint operation.");
 
@@ -356,6 +352,12 @@ where
     }
 }
 
+impl<K> Index<K> {
+    pub fn read_state(&self) -> IndexReadGuard<'_, K> {
+        IndexReadGuard { inner: self.state.read() }
+    }
+}
+
 impl<K: Debug> Debug for Index<K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let state_guard = self.state.read();
@@ -381,46 +383,10 @@ pub struct IndexReadGuard<'a, K> {
     inner: parking_lot::RwLockReadGuard<'a, IndexState<K>>,
 }
 
-impl<'a, K> IndexReadGuard<'a, K>
-where
-    K: Debug + Clone + Ord,
-{
-    /// Returns the item for the given key, if it exists.
-    pub fn get_item(&self, key: &K) -> Option<IndexStateItem> {
-        self.inner.key_to_hash.get(key).copied()
-    }
-
-    /// Returns the item for the given key, or an error if it is not present.
-    pub fn require_item(&self, key: &K) -> Result<IndexStateItem, IndexError> {
-        self.get_item(key).ok_or(IndexError::KeyNotFound { key: format!("{key:?}") })
-    }
-
-    /// Returns `true` if the index contains the specified key.
-    pub fn contains_key(&self, key: &K) -> bool {
-        self.inner.key_to_hash.contains_key(key)
-    }
-
-    /// Returns an iterator over all entries in ascending key order.
-    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, K, IndexStateItem> {
-        self.inner.key_to_hash.iter()
-    }
-
-    /// Returns an iterator over entries within the specified key range, in ascending order.
-    /// The range may use a borrowed form of the key (e.g., `&str` for `String`).
-    pub fn range<T, R>(&self, range: R) -> std::collections::btree_map::Range<'_, K, IndexStateItem>
-    where
-        T: ?Sized + Ord,
-        K: Borrow<T> + Ord,
-        R: RangeBounds<T>,
-    {
-        self.inner.key_to_hash.range(range)
-    }
-
-    /// Returns a snapshot of the current key map.
-    /// Calls `clone` inside.
+impl<'a, K> IndexReadGuard<'a, K> {
     #[must_use]
-    pub fn keys_snapshot(&self) -> BTreeMap<K, IndexStateItem> {
-        self.inner.key_to_hash.clone()
+    pub fn stats(&self) -> DbStats {
+        self.inner.stats
     }
 
     /// Returns the number of keys in the index.
@@ -447,9 +413,57 @@ where
         self.inner.hash_to_ref_count.contains_key(hash)
     }
 
+    /// Returns an iterator over entries within the specified key range, in ascending order.
+    /// The range may use a borrowed form of the key (e.g., `&str` for `String`).
+    pub fn range<T, R>(&self, range: R) -> std::collections::btree_map::Range<'_, K, IndexStateItem>
+    where
+        T: ?Sized + Ord,
+        K: Borrow<T> + Ord,
+        R: RangeBounds<T>,
+    {
+        self.inner.key_to_hash.range(range)
+    }
+}
+
+impl<'a, K> IndexReadGuard<'a, K>
+where
+    K: Ord,
+{
+    /// Returns the item for the given key, if it exists.
+    pub fn get_item(&self, key: &K) -> Option<IndexStateItem> {
+        self.inner.key_to_hash.get(key).copied()
+    }
+
+    /// Returns `true` if the index contains the specified key.
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.inner.key_to_hash.contains_key(key)
+    }
+
+    /// Returns an iterator over all entries in ascending key order.
+    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, K, IndexStateItem> {
+        self.inner.key_to_hash.iter()
+    }
+}
+
+impl<'a, K> IndexReadGuard<'a, K>
+where
+    K: Debug + Ord,
+{
+    /// Returns the item for the given key, or an error if it is not present.
+    pub fn require_item(&self, key: &K) -> Result<IndexStateItem, IndexError> {
+        self.get_item(key).ok_or(IndexError::KeyNotFound { key: format!("{key:?}") })
+    }
+}
+
+impl<'a, K> IndexReadGuard<'a, K>
+where
+    K: Clone,
+{
+    /// Returns a snapshot of the current key map.
+    /// Calls `clone` inside.
     #[must_use]
-    pub fn stats(&self) -> DbStats {
-        self.inner.stats
+    pub fn keys_snapshot(&self) -> BTreeMap<K, IndexStateItem> {
+        self.inner.key_to_hash.clone()
     }
 }
 

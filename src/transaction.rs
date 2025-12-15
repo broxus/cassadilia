@@ -39,10 +39,7 @@ where
 }
 
 #[must_use = "Transaction must be completed by calling finish()"]
-pub struct Transaction<'a, K>
-where
-    K: Debug,
-{
+pub struct Transaction<'a, K> {
     pub(crate) temp_file: NamedTempFile,
     pub(crate) cas_inner: &'a CasInner<K>,
     pub(crate) writer: BufWriter<File>,
@@ -87,19 +84,6 @@ where
         })
     }
 
-    /// Append `data` to the transaction.
-    /// Most common usage is to incrementally compress and write chunks.
-    pub fn write(&mut self, data: &[u8]) -> Result<(), TransactionError> {
-        self.size += data.len() as u64;
-        self.hasher.update(data);
-        self.writer.write_all(data).map_err(|e| TransactionError::StagingFileIo {
-            operation: StagingFileOp::Write,
-            path: self.temp_file.path().to_path_buf(),
-            source: e,
-        })?;
-        Ok(())
-    }
-
     pub fn finish(self) -> Result<(), crate::LibError> {
         tracing::debug!("Finishing transaction for key '{:?}'", self.key);
         self.commit()
@@ -139,6 +123,21 @@ where
         // Commit the intent - this applies the WAL operation and deletes unreferenced blobs
         intent_guard.commit(&delete_fn).map_err(crate::LibError::Index)?;
 
+        Ok(())
+    }
+}
+
+impl<'a, K> Transaction<'a, K> {
+    /// Append `data` to the transaction.
+    /// Most common usage is to incrementally compress and write chunks.
+    pub fn write(&mut self, data: &[u8]) -> Result<(), TransactionError> {
+        self.size += data.len() as u64;
+        self.hasher.update(data);
+        self.writer.write_all(data).map_err(|e| TransactionError::StagingFileIo {
+            operation: StagingFileOp::Write,
+            path: self.temp_file.path().to_path_buf(),
+            source: e,
+        })?;
         Ok(())
     }
 }

@@ -28,10 +28,7 @@ pub struct IndexStateItem {
     pub blob_size: u64,
 }
 
-impl<K> IndexState<K>
-where
-    K: Clone + Eq + Ord,
-{
+impl<K> IndexState<K> {
     pub fn new() -> Self {
         IndexState {
             key_to_hash: BTreeMap::new(),
@@ -57,6 +54,41 @@ where
         self.stats.index.serialized_size_bytes = index_file_size_bytes;
     }
 
+    pub(crate) fn increment_ref(&mut self, hash: &BlobHash) -> bool {
+        let entry = self.hash_to_ref_count.entry(*hash).or_default();
+        let was_zero = *entry == 0;
+        *entry += 1;
+        was_zero
+    }
+
+    pub(crate) fn decrement_ref(
+        &mut self,
+        hash_to_decrement: &BlobHash,
+    ) -> Result<Option<BlobHash>, IndexStateError> {
+        match self.hash_to_ref_count.get_mut(hash_to_decrement) {
+            Some(count) => {
+                if *count == 0 {
+                    return Err(IndexStateError::DecrementZeroRefCount {
+                        hash: *hash_to_decrement,
+                    });
+                }
+                *count -= 1;
+                if *count == 0 {
+                    self.hash_to_ref_count.remove(hash_to_decrement);
+                    Ok(Some(*hash_to_decrement))
+                } else {
+                    Ok(None)
+                }
+            }
+            None => Err(IndexStateError::HashNotFoundForDecrement { hash: *hash_to_decrement }),
+        }
+    }
+}
+
+impl<K> IndexState<K>
+where
+    K: Clone + Ord,
+{
     pub fn apply_logical_op(&mut self, op: &WalOp<K>) -> Result<Vec<BlobHash>, IndexStateError> {
         let mut unreferenced_hashes = Vec::new();
 
@@ -115,35 +147,5 @@ where
         }
 
         Ok(unreferenced_hashes)
-    }
-
-    pub(crate) fn increment_ref(&mut self, hash: &BlobHash) -> bool {
-        let entry = self.hash_to_ref_count.entry(*hash).or_default();
-        let was_zero = *entry == 0;
-        *entry += 1;
-        was_zero
-    }
-
-    pub(crate) fn decrement_ref(
-        &mut self,
-        hash_to_decrement: &BlobHash,
-    ) -> Result<Option<BlobHash>, IndexStateError> {
-        match self.hash_to_ref_count.get_mut(hash_to_decrement) {
-            Some(count) => {
-                if *count == 0 {
-                    return Err(IndexStateError::DecrementZeroRefCount {
-                        hash: *hash_to_decrement,
-                    });
-                }
-                *count -= 1;
-                if *count == 0 {
-                    self.hash_to_ref_count.remove(hash_to_decrement);
-                    Ok(Some(*hash_to_decrement))
-                } else {
-                    Ok(None)
-                }
-            }
-            None => Err(IndexStateError::HashNotFoundForDecrement { hash: *hash_to_decrement }),
-        }
     }
 }
