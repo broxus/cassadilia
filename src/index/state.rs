@@ -14,18 +14,18 @@ pub enum IndexStateError {
     HashNotFoundForDecrement { hash: BlobHash },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexStateItem {
+    pub blob_hash: BlobHash,
+    pub blob_size: u64,
+}
+
 #[derive(Debug, Default, Clone)]
 pub(crate) struct IndexState<K> {
     pub(crate) key_to_hash: BTreeMap<K, IndexStateItem>,
     pub(crate) hash_to_ref_count: HashMap<BlobHash, u32>,
     pub(crate) last_persisted_version: Option<NonZeroU64>,
     pub(crate) stats: DbStats,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IndexStateItem {
-    pub blob_hash: BlobHash,
-    pub blob_size: u64,
 }
 
 impl<K> IndexState<K> {

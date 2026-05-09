@@ -323,12 +323,6 @@ pub enum TypesError {
 
 // === WAL ===
 
-/// At each operation index was checkpointed.
-/// None means checkpoint has never been performed.
-pub(crate) type CheckpointState = Option<NonZeroU64>;
-
-pub(crate) type DeleteBlobCallFn<'a> = dyn Fn(&[BlobHash]) -> Result<(), CasManagerError> + 'a;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckpointReason {
     /// Fresh database initialization
@@ -347,6 +341,12 @@ pub const WAL_ENTRY_OP_LEN_SIZE: usize = size_of::<u32>();
 pub const WAL_ENTRY_HEADER_SIZE: usize =
     WAL_ENTRY_VERSION_SIZE + WAL_ENTRY_OP_HASH_SIZE + WAL_ENTRY_OP_LEN_SIZE;
 
+/// At each operation index was checkpointed.
+/// None means checkpoint has never been performed.
+pub(crate) type CheckpointState = Option<NonZeroU64>;
+
+pub(crate) type DeleteBlobCallFn<'a> = dyn Fn(&[BlobHash]) -> Result<(), CasManagerError> + 'a;
+
 /// Represents a discovered WAL segment
 #[derive(Debug, Clone)]
 pub(crate) struct SegmentInfo {
@@ -364,7 +364,9 @@ impl SegmentInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::path::PathBuf;
+
+    use super::{BlobHash, HASH_SIZE};
 
     #[test]
     fn test_blob_hash_relative_path_roundtrip() {

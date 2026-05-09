@@ -2,7 +2,10 @@ use std::num::NonZeroU64;
 
 use anyhow::Result;
 
-use crate::tests::utils::*;
+use crate::tests::utils::{
+    CasTestHarness, assert_all_ref_counts_are, assert_key_count, count_wal_segments, populate_cas,
+    setup_tracing, verify_cas_data, verify_refcount_integrity,
+};
 use crate::{Config, calculate_blob_hash};
 
 #[test]
@@ -18,7 +21,7 @@ fn test_replay_creates_checkpoint_after_restart() -> Result<()> {
         populate_cas(cas, 0..5, "data")?;
         assert_key_count(cas, 5);
         // Verify no checkpoint exists yet
-        assert!(cas.0.index.state.read().last_persisted_version.is_none());
+        assert!(cas.as_arc().index.state.read().last_persisted_version.is_none());
         Ok(())
     })?;
 
@@ -29,7 +32,7 @@ fn test_replay_creates_checkpoint_after_restart() -> Result<()> {
         verify_refcount_integrity(cas, 5)?; // Verifies no double-replay
 
         // Checkpoint should now exist at version 5
-        assert_eq!(cas.0.index.state.read().last_persisted_version, NonZeroU64::new(5));
+        assert_eq!(cas.as_arc().index.state.read().last_persisted_version, NonZeroU64::new(5));
 
         // Write 3 more ops
         populate_cas(cas, 5..8, "data")?;
@@ -47,7 +50,7 @@ fn test_replay_creates_checkpoint_after_restart() -> Result<()> {
         verify_refcount_integrity(cas, 8)?;
 
         // Checkpoint = 8 from prior session
-        assert_eq!(cas.0.index.state.read().last_persisted_version, NonZeroU64::new(8));
+        assert_eq!(cas.as_arc().index.state.read().last_persisted_version, NonZeroU64::new(8));
         Ok(())
     })?;
 
@@ -171,7 +174,7 @@ fn test_overwrite_deletes_old_blob_no_orphans() -> Result<()> {
         tx.finish()?;
 
         // Verify state before shutdown: hash_a is gone, hash_b is active.
-        let state = cas.0.index.state.read();
+        let state = cas.as_arc().index.state.read();
         assert!(!state.hash_to_ref_count.contains_key(&hash_a), "hash_a still here");
         assert_eq!(state.hash_to_ref_count.get(&hash_b), Some(&1), "hash_b refcnt != 1");
         drop(state);
@@ -186,7 +189,7 @@ fn test_overwrite_deletes_old_blob_no_orphans() -> Result<()> {
         assert_eq!(orphans.orphaned_blobs.len(), 0, "found orphans");
 
         // Verify final state is still correct.
-        let state = cas.0.index.state.read();
+        let state = cas.as_arc().index.state.read();
         assert_eq!(state.hash_to_ref_count.get(&hash_b), Some(&1), "hash_b refcnt != 1");
         Ok(())
     })?;
@@ -221,7 +224,7 @@ fn test_wal_segment_rollover_triggers_checkpoint() -> Result<()> {
         // After rollover, segment 0 is pruned, only segment 1 remains
         assert_eq!(count_wal_segments(harness.db_path())?, 1, "seg0 not pruned");
         assert_eq!(
-            cas.0.index.state.read().last_persisted_version,
+            cas.as_arc().index.state.read().last_persisted_version,
             NonZeroU64::new(6),
             "checkpoint != 6"
         );
@@ -236,7 +239,7 @@ fn test_wal_segment_rollover_triggers_checkpoint() -> Result<()> {
 
         // Verify checkpoint is still at version 6
         assert_eq!(
-            cas.0.index.state.read().last_persisted_version,
+            cas.as_arc().index.state.read().last_persisted_version,
             NonZeroU64::new(6),
             "checkpoint lost"
         );
@@ -257,14 +260,20 @@ fn test_empty_database_checkpoint_on_first_write() -> Result<()> {
     // Empty DB: no checkpoint
     harness.run_session(|cas| {
         assert_key_count(cas, 0);
-        assert!(cas.0.index.state.read().last_persisted_version.is_none(), "has checkpoint?");
+        assert!(
+            cas.as_arc().index.state.read().last_persisted_version.is_none(),
+            "has checkpoint?"
+        );
         Ok(())
     })?;
 
     // Still empty
     harness.run_session(|cas| {
         assert_key_count(cas, 0);
-        assert!(cas.0.index.state.read().last_persisted_version.is_none(), "still has checkpoint?");
+        assert!(
+            cas.as_arc().index.state.read().last_persisted_version.is_none(),
+            "still has checkpoint?"
+        );
         Ok(())
     })?;
 
@@ -279,7 +288,7 @@ fn test_empty_database_checkpoint_on_first_write() -> Result<()> {
     harness.run_session(|cas| {
         assert_key_count(cas, 1);
         assert_eq!(
-            cas.0.index.state.read().last_persisted_version,
+            cas.as_arc().index.state.read().last_persisted_version,
             NonZeroU64::new(1),
             "no checkpoint at 1"
         );

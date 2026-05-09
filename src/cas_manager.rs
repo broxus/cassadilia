@@ -8,33 +8,6 @@ use thiserror::Error;
 use crate::paths;
 use crate::types::BlobHash;
 
-#[derive(Debug, Clone)]
-pub enum CasIoOperation {
-    ReadContent,
-    ReadMetadata,
-    OpenBuffered,
-    OpenRangeRead,
-    ReadRange,
-    CreateSubdir,
-    MoveStaged,
-    RemoveStaged,
-    RemoveFile,
-}
-
-#[derive(Error, Debug)]
-pub enum CasManagerError {
-    #[error("CAS IO error during {operation:?} for path {path:?}")]
-    FileOperation {
-        operation: CasIoOperation,
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error("Invalid range: start ({start}) > end ({end})")]
-    InvalidRangeStartEnd { start: u64, end: u64 },
-}
-
 pub struct CasManager {
     paths: paths::DbPaths,
     dir_tree_is_pre_created: bool,
@@ -210,4 +183,31 @@ impl CasManager {
 
         Ok(())
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum CasIoOperation {
+    ReadContent,
+    ReadMetadata,
+    OpenBuffered,
+    OpenRangeRead,
+    ReadRange,
+    CreateSubdir,
+    MoveStaged,
+    RemoveStaged,
+    RemoveFile,
+}
+
+#[derive(Error, Debug)]
+pub enum CasManagerError {
+    #[error("CAS IO error during {operation:?} for path {path:?}")]
+    FileOperation {
+        operation: CasIoOperation,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("Invalid range: start ({start}) > end ({end})")]
+    InvalidRangeStartEnd { start: u64, end: u64 },
 }

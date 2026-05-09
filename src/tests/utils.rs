@@ -72,24 +72,24 @@ pub fn verify_cas_data(cas: &Cas<String>, range: Range<u32>, data_prefix: &str) 
 }
 
 pub fn assert_key_count(cas: &Cas<String>, expected: usize) {
-    let count = cas.0.read_index_state().len();
+    let count = cas.read_index_state().len();
     assert_eq!(count, expected, "want {}, got {}", expected, count);
 }
 
 pub fn assert_all_ref_counts_are(cas: &Cas<String>, expected_count: u32) -> Result<()> {
-    let state = cas.0.index.state.read();
-    for (hash, count) in state.hash_to_ref_count.iter() {
+    let state = cas.read_index_state();
+    for (hash, count) in state.known_blobs() {
         assert_eq!(*count, expected_count, "refcnt {} != {} for {:?}", count, expected_count, hash);
     }
     Ok(())
 }
 
 pub fn verify_refcount_integrity(cas: &Cas<String>, expected_keys: usize) -> Result<()> {
-    let state = cas.0.index.state.read();
+    let state = cas.read_index_state();
 
-    assert_eq!(state.hash_to_ref_count.len(), expected_keys, "want {} uniq", expected_keys);
+    assert_eq!(state.known_blobs().len(), expected_keys, "want {} uniq", expected_keys);
 
-    for (hash, count) in state.hash_to_ref_count.iter() {
+    for (hash, count) in state.known_blobs() {
         assert_eq!(*count, 1, "refcnt {} != 1 for {:?}", count, hash);
     }
 
@@ -107,90 +107,4 @@ pub fn count_wal_segments(db_path: &Path) -> Result<usize> {
 }
 
 #[cfg(test)]
-pub mod directory_helpers {
-    use std::path::Path;
-
-    use anyhow::Result;
-
-    pub fn count_directories_recursive(path: &Path) -> Result<usize> {
-        let mut count = 0;
-
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let path = entry.path();
-
-            if path.is_dir() {
-                count += 1;
-                count += count_directories_recursive(&path)?;
-            }
-        }
-
-        Ok(count)
-    }
-
-    pub fn count_leaf_directories(path: &Path) -> Result<usize> {
-        let mut count = 0;
-        let mut has_subdirs = false;
-
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let path = entry.path();
-
-            if path.is_dir() {
-                has_subdirs = true;
-                count += count_leaf_directories(&path)?;
-            }
-        }
-
-        // If no subdirectories, this is a leaf directory
-        if !has_subdirs {
-            count = 1;
-        }
-
-        Ok(count)
-    }
-
-    #[derive(Debug)]
-    pub struct DirectoryStructure {
-        pub depth: usize,
-        pub dirs_per_level: Vec<usize>,
-    }
-
-    pub fn analyze_directory_structure(root: &Path) -> Result<DirectoryStructure> {
-        let mut dirs_per_level = Vec::new();
-        let mut max_depth = 0;
-
-        fn analyze_level(
-            path: &Path,
-            level: usize,
-            dirs_per_level: &mut Vec<usize>,
-            max_depth: &mut usize,
-        ) -> Result<()> {
-            if dirs_per_level.len() <= level {
-                dirs_per_level.resize(level + 1, 0);
-            }
-
-            let mut dir_count = 0;
-            for entry in std::fs::read_dir(path)? {
-                let entry = entry?;
-                let path = entry.path();
-
-                if path.is_dir() {
-                    dir_count += 1;
-                    *max_depth = (*max_depth).max(level + 1);
-                    analyze_level(&path, level + 1, dirs_per_level, max_depth)?;
-                }
-            }
-
-            let Some(count) = dirs_per_level.get_mut(level) else {
-                return Err(anyhow::anyhow!("missing level {level} in dirs_per_level"));
-            };
-            *count += dir_count;
-            Ok(())
-        }
-
-        analyze_level(root, 0, &mut dirs_per_level, &mut max_depth)?;
-
-        Ok(DirectoryStructure { depth: max_depth, dirs_per_level })
-    }
-}
+pub mod directory_helpers;

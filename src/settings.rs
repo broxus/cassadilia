@@ -8,13 +8,6 @@ use crate::io::atomically_write_file_bytes;
 
 pub const CURRENT_DB_VERSION: u32 = 4;
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub(crate) struct DbSettings {
-    pub version: u32,
-    pub dir_tree_is_pre_created: bool,
-    pub num_ops_per_wal: NonZeroU64,
-}
-
 #[derive(Error, Debug)]
 pub enum SettingsError {
     #[error("Failed to read settings file: {0}")]
@@ -34,6 +27,13 @@ pub enum SettingsError {
 
     #[error("Unsupported database version: {found}, expected: {expected}")]
     UnsupportedVersion { found: u32, expected: u32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub(crate) struct DbSettings {
+    pub version: u32,
+    pub dir_tree_is_pre_created: bool,
+    pub num_ops_per_wal: NonZeroU64,
 }
 
 pub(crate) struct SettingsPersister {
@@ -80,10 +80,12 @@ impl SettingsPersister {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
+
     use anyhow::Result;
     use tempfile::tempdir;
 
-    use super::*;
+    use super::{CURRENT_DB_VERSION, SettingsError, SettingsPersister};
     use crate::tests::utils::directory_helpers::{
         analyze_directory_structure, count_directories_recursive, count_leaf_directories,
     };

@@ -126,21 +126,12 @@ pub(crate) struct SegmentReader {
     path: PathBuf,
 }
 
-pub(crate) struct WalEntryRaw {
-    pub version: NonZeroU64,
-    pub op_data: Vec<u8>,
-}
-
 impl SegmentReader {
     pub(crate) fn new(segment_id: u64, path: PathBuf, file: File) -> Self {
         Self { file, segment_id, path }
     }
-}
 
-impl Iterator for SegmentReader {
-    type Item = Result<WalEntryRaw, WalError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+    fn read_next_entry(&mut self) -> Result<Option<WalEntryRaw>, WalError> {
         let segment_id = self.segment_id;
         let path = self.path.clone();
 
@@ -156,94 +147,98 @@ impl Iterator for SegmentReader {
             replay_io(WalReplayIoStep::ReadHeader, std::io::Error::new(ErrorKind::InvalidData, msg))
         };
 
-        let entry: Result<Option<WalEntryRaw>, WalError> = (|| {
-            // ---- read header ----
-            let mut header = [0u8; WAL_ENTRY_HEADER_SIZE];
-            match self.file.read_exact(&mut header) {
-                Ok(()) => {}
-                Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
-                    tracing::debug!(
-                        "Reached end of WAL segment {} at '{}'.",
-                        segment_id,
-                        path.display()
-                    );
-                    return Ok(None);
-                }
-                Err(e) => return Err(replay_io(WalReplayIoStep::ReadHeader, e)),
-            }
-
-            // ---- parse header ----
-            let (ver_s, rest) = header
-                .split_at_checked(WAL_ENTRY_VERSION_SIZE)
-                .ok_or_else(|| hdr_eof("missing version bytes in WAL header"))?;
-
-            let (hash_s, rest) = rest
-                .split_at_checked(WAL_ENTRY_OP_HASH_SIZE)
-                .ok_or_else(|| hdr_eof("missing hash bytes in WAL header"))?;
-
-            let (len_s, extra) = rest
-                .split_at_checked(WAL_ENTRY_OP_LEN_SIZE)
-                .ok_or_else(|| hdr_eof("missing op length bytes in WAL header"))?;
-
-            if !extra.is_empty() {
-                return Err(hdr_bad("extra bytes in WAL header"));
-            }
-
-            let version = u64::from_le_bytes(
-                ver_s.try_into().map_err(|_e| hdr_bad("bad version bytes in WAL header"))?,
-            );
-
-            if version == 0 {
+        // ---- read header ----
+        let mut header = [0u8; WAL_ENTRY_HEADER_SIZE];
+        match self.file.read_exact(&mut header) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
                 tracing::debug!(
-                    "Reached end-of-segment marker (version 0) in segment {}. Cleanly ending replay for this segment.",
-                    segment_id
-                );
-                return Ok(None);
-            }
-
-            let expected =
-                BlobHash(hash_s.try_into().map_err(|_e| hdr_bad("bad hash bytes in WAL header"))?);
-
-            let op_len = u32::from_le_bytes(
-                len_s.try_into().map_err(|_e| hdr_bad("bad op length bytes in WAL header"))?,
-            ) as usize;
-
-            if op_len == 0 {
-                tracing::warn!(
-                    "WAL entry (version {}) in segment {} has zero op length. Assuming end of valid entries.",
-                    version,
-                    segment_id
-                );
-                return Ok(None);
-            }
-
-            // ---- read op data ----
-            let mut op_data = vec![0u8; op_len];
-            self.file
-                .read_exact(&mut op_data)
-                .map_err(|e| replay_io(WalReplayIoStep::ReadOpData, e))?;
-
-            // ---- verify ----
-            let actual = calculate_blob_hash(&op_data);
-            if actual != expected {
-                return Err(WalError::ReplayChecksumMismatch {
-                    version,
+                    "Reached end of WAL segment {} at '{}'.",
                     segment_id,
-                    expected,
-                    actual,
-                });
+                    path.display()
+                );
+                return Ok(None);
             }
+            Err(e) => return Err(replay_io(WalReplayIoStep::ReadHeader, e)),
+        }
 
-            let version = NonZeroU64::new(version).ok_or(WalError::InvalidOpVersion { version })?;
-            Ok(Some(WalEntryRaw { version, op_data }))
-        })();
+        // ---- parse header ----
+        let (ver_s, rest) = header
+            .split_at_checked(WAL_ENTRY_VERSION_SIZE)
+            .ok_or_else(|| hdr_eof("missing version bytes in WAL header"))?;
 
-        match entry {
+        let (hash_s, rest) = rest
+            .split_at_checked(WAL_ENTRY_OP_HASH_SIZE)
+            .ok_or_else(|| hdr_eof("missing hash bytes in WAL header"))?;
+
+        let (len_s, extra) = rest
+            .split_at_checked(WAL_ENTRY_OP_LEN_SIZE)
+            .ok_or_else(|| hdr_eof("missing op length bytes in WAL header"))?;
+
+        if !extra.is_empty() {
+            return Err(hdr_bad("extra bytes in WAL header"));
+        }
+
+        let version = u64::from_le_bytes(
+            ver_s.try_into().map_err(|_e| hdr_bad("bad version bytes in WAL header"))?,
+        );
+
+        if version == 0 {
+            tracing::debug!(
+                "Reached end-of-segment marker (version 0) in segment {}. Cleanly ending replay for this segment.",
+                segment_id
+            );
+            return Ok(None);
+        }
+
+        let expected =
+            BlobHash(hash_s.try_into().map_err(|_e| hdr_bad("bad hash bytes in WAL header"))?);
+
+        let op_len = u32::from_le_bytes(
+            len_s.try_into().map_err(|_e| hdr_bad("bad op length bytes in WAL header"))?,
+        ) as usize;
+
+        if op_len == 0 {
+            tracing::warn!(
+                "WAL entry (version {}) in segment {} has zero op length. Assuming end of valid entries.",
+                version,
+                segment_id
+            );
+            return Ok(None);
+        }
+
+        // ---- read op data ----
+        let mut op_data = vec![0u8; op_len];
+        self.file
+            .read_exact(&mut op_data)
+            .map_err(|e| replay_io(WalReplayIoStep::ReadOpData, e))?;
+
+        // ---- verify ----
+        let actual = calculate_blob_hash(&op_data);
+        if actual != expected {
+            return Err(WalError::ReplayChecksumMismatch { version, segment_id, expected, actual });
+        }
+
+        let version = NonZeroU64::new(version).ok_or(WalError::InvalidOpVersion { version })?;
+        Ok(Some(WalEntryRaw { version, op_data }))
+    }
+}
+
+impl Iterator for SegmentReader {
+    type Item = Result<WalEntryRaw, WalError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.read_next_entry() {
             Ok(Some(v)) => Some(Ok(v)),
             Ok(None) => None,
             Err(e) => Some(Err(e)),
         }
     }
+}
+
+pub(crate) struct WalEntryRaw {
+    pub version: NonZeroU64,
+    pub op_data: Vec<u8>,
 }
 
 pub(crate) struct SegmentStorage {

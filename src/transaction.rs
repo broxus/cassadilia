@@ -26,18 +26,6 @@ pub enum TransactionError {
     },
 }
 
-impl<T> Debug for Transaction<'_, T>
-where
-    T: Debug,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Transaction")
-            .field("temp_file", &self.temp_file.path())
-            .field("key", &self.key)
-            .finish()
-    }
-}
-
 #[must_use = "Transaction must be completed by calling finish()"]
 pub struct Transaction<'a, K> {
     pub(crate) temp_file: NamedTempFile,
@@ -139,5 +127,17 @@ impl<'a, K> Transaction<'a, K> {
             source: e,
         })?;
         Ok(())
+    }
+}
+
+impl<T> Debug for Transaction<'_, T>
+where
+    T: Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Transaction")
+            .field("temp_file", &self.temp_file.path())
+            .field("key", &self.key)
+            .finish()
     }
 }

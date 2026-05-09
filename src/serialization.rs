@@ -25,23 +25,6 @@ pub enum SerializationError {
     InvalidVariantTag { tag: u8, enum_name: &'static str, parsing_context: &'static str },
 }
 
-#[inline]
-fn take_bytes<'a>(
-    bytes: &mut &'a [u8],
-    len: usize,
-    entity: &'static str,
-    parsing_context: &'static str,
-) -> Result<&'a [u8], SerializationError> {
-    let (head, rest) = bytes.split_at_checked(len).ok_or(SerializationError::InsufficientData {
-        entity,
-        expected: len,
-        found: bytes.len(),
-        parsing_context,
-    })?;
-    *bytes = rest;
-    Ok(head)
-}
-
 /// serialize `BTreeMap`<Vec<u8>, `IndexStateItem`> using hand-rolled format
 /// format: [u64 `last_persisted_version`][u32 `num_entries`][[u32
 /// `key_len`][key_bytes][`32_bytes_hash`][u64 `blob_size`]]...
@@ -240,12 +223,34 @@ fn read_bytes_with_len(
     Ok(data.to_vec())
 }
 
+#[inline]
+fn take_bytes<'a>(
+    bytes: &mut &'a [u8],
+    len: usize,
+    entity: &'static str,
+    parsing_context: &'static str,
+) -> Result<&'a [u8], SerializationError> {
+    let (head, rest) = bytes.split_at_checked(len).ok_or(SerializationError::InsufficientData {
+        entity,
+        expected: len,
+        found: bytes.len(),
+        parsing_context,
+    })?;
+    *bytes = rest;
+    Ok(head)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::num::NonZeroU64;
 
-    use super::*;
-    use crate::types::{BlobHash, HASH_SIZE, WalOpRaw};
+    use super::{
+        deserialize_index_state, deserialize_wal_op_raw, read_bytes_with_len, read_fixed_bytes,
+        read_u8, read_u32, serialize_index_state, serialize_wal_op_raw,
+    };
+    use crate::index::IndexStateItem;
+    use crate::types::{BlobHash, HASH_SIZE, KeyBytes, WalOpRaw};
 
     fn make_test_item(byte: u8) -> IndexStateItem {
         let mut bytes = [0u8; HASH_SIZE];

@@ -4,7 +4,11 @@ use std::num::NonZeroU64;
 
 use tempfile::tempdir;
 
-use super::*;
+use super::{WalError, WalIoOperation, WalManager, WalReplayIoStep};
+use crate::paths::DbPaths;
+use crate::serialization::serialize_wal_op_raw;
+use crate::types::{BlobHash, CheckpointReason, CheckpointState, KeyBytes, WalOpRaw};
+use crate::wal::storage::SegmentStorage;
 
 fn perform_checkpoint(
     wal: &mut WalManager,
@@ -25,12 +29,8 @@ fn perform_checkpoint(
     Ok(Some(version))
 }
 
-use crate::paths::DbPaths;
-use crate::serialization::serialize_wal_op_raw;
-use crate::types::{BlobHash, CheckpointReason, WalOpRaw};
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TestKey(pub u64);
+struct TestKey(pub u64);
 
 impl KeyBytes for TestKey {
     type Bytes = [u8; 8];

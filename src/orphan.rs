@@ -9,39 +9,7 @@ use ahash::{HashMap, HashSet};
 use crate::types::BlobHash;
 use crate::{CasInner, KeyBytes, LibError, LibIoOperation};
 
-#[derive(Debug)]
-struct ExpectedMeta {
-    blob_size: u64,
-}
-
-fn verify_blob_integrity(
-    path: &Path,
-    expected_hash: &BlobHash,
-    expected_meta: &ExpectedMeta,
-) -> Result<bool, LibError> {
-    let meta = std::fs::metadata(path).map_err(|e| LibError::Io {
-        operation: LibIoOperation::ReadContent,
-        path: Some(path.to_path_buf()),
-        source: e,
-    })?;
-    if meta.len() != expected_meta.blob_size {
-        return Ok(false);
-    }
-
-    let mut hasher = blake3::Hasher::new();
-
-    hasher.update_mmap_rayon(path).map_err(|e| LibError::Io {
-        operation: LibIoOperation::ReadContent,
-        path: Some(path.to_path_buf()),
-        source: e,
-    })?;
-
-    let actual_hash = BlobHash(hasher.finalize().into());
-    Ok(actual_hash == *expected_hash)
-}
-
 pub struct OrphanStats<K> {
-    pub(crate) cas_inner: Arc<crate::CasInner<K>>,
     /// Blobs that are not referenced by any keys
     pub orphaned_blobs: Vec<BlobHash>,
     /// Files which name is not a valid blob hash
@@ -53,6 +21,7 @@ pub struct OrphanStats<K> {
     pub staging_files: Vec<PathBuf>,
     pub total_blobs: usize,
     pub scan_duration: Duration,
+    pub(crate) cas_inner: Arc<CasInner<K>>,
 }
 
 #[derive(Debug, Default)]
@@ -126,15 +95,12 @@ impl<K> OrphanStats<K> {
     }
 
     /// Quarantine orphaned blobs to a specified directory
-    pub fn quarantine_orphans(
-        &self,
-        quarantine_dir: &std::path::Path,
-    ) -> Result<RecoveryResult, crate::LibError> {
+    pub fn quarantine_orphans(&self, quarantine_dir: &Path) -> Result<RecoveryResult, LibError> {
         let mut result = RecoveryResult::default();
 
         // Create quarantine directory
-        std::fs::create_dir_all(quarantine_dir).map_err(|e| crate::LibError::Io {
-            operation: crate::LibIoOperation::CreateCasDir,
+        std::fs::create_dir_all(quarantine_dir).map_err(|e| LibError::Io {
+            operation: LibIoOperation::CreateCasDir,
             path: Some(quarantine_dir.to_path_buf()),
             source: e,
         })?;
@@ -176,7 +142,7 @@ impl<K> OrphanStats<K> {
     }
 
     /// Delete a specific orphaned blob
-    pub fn delete_orphan(&self, hash: &BlobHash) -> Result<bool, crate::LibError> {
+    pub fn delete_orphan(&self, hash: &BlobHash) -> Result<bool, LibError> {
         if !self.orphaned_blobs.contains(hash) {
             return Ok(false); // Not in orphan list
         }
@@ -194,8 +160,8 @@ impl<K> OrphanStats<K> {
         match std::fs::remove_file(&blob_path) {
             Ok(_) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(crate::LibError::Io {
-                operation: crate::LibIoOperation::RemoveFile,
+            Err(e) => Err(LibError::Io {
+                operation: LibIoOperation::RemoveFile,
                 path: Some(blob_path),
                 source: e,
             }),
@@ -325,7 +291,6 @@ where
     let staging_files = scan_staging_files(cas_inner)?;
 
     Ok(OrphanStats {
-        cas_inner: cas_inner_arc,
         orphaned_blobs,
         invalid_files,
         missing_blobs,
@@ -333,7 +298,39 @@ where
         staging_files,
         total_blobs: seen_blobs.len(),
         scan_duration: start_time.elapsed(),
+        cas_inner: cas_inner_arc,
     })
+}
+
+#[derive(Debug)]
+struct ExpectedMeta {
+    blob_size: u64,
+}
+
+fn verify_blob_integrity(
+    path: &Path,
+    expected_hash: &BlobHash,
+    expected_meta: &ExpectedMeta,
+) -> Result<bool, LibError> {
+    let meta = std::fs::metadata(path).map_err(|e| LibError::Io {
+        operation: LibIoOperation::ReadContent,
+        path: Some(path.to_path_buf()),
+        source: e,
+    })?;
+    if meta.len() != expected_meta.blob_size {
+        return Ok(false);
+    }
+
+    let mut hasher = blake3::Hasher::new();
+
+    hasher.update_mmap_rayon(path).map_err(|e| LibError::Io {
+        operation: LibIoOperation::ReadContent,
+        path: Some(path.to_path_buf()),
+        source: e,
+    })?;
+
+    let actual_hash = BlobHash(hasher.finalize().into());
+    Ok(actual_hash == *expected_hash)
 }
 
 fn scan_staging_files<K>(cas_inner: &CasInner<K>) -> Result<Vec<PathBuf>, LibError>

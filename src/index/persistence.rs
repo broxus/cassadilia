@@ -8,6 +8,20 @@ use crate::paths::DbPaths;
 use crate::serialization::{SerializationError, deserialize_index_state, serialize_index_state};
 use crate::types::KeyBytes;
 
+#[derive(Error, Debug)]
+pub enum PersisterError {
+    #[error("Persister: Failed to read index file")]
+    ReadIndexIo(#[source] std::io::Error),
+    #[error("Persister: Failed to decode index data")]
+    DecodeIndex(#[from] SerializationError),
+    #[error("Persister: Failed to decode key from index")]
+    DecodeKey,
+    #[error("Persister: Failed to atomically write index state")]
+    AtomicWrite(#[from] IoError),
+    #[error("Index file is empty")]
+    EmptyIndexFile,
+}
+
 pub(crate) struct IndexStatePersister<'a> {
     paths: &'a DbPaths,
 }
@@ -81,18 +95,4 @@ impl<'a> IndexStatePersister<'a> {
         );
         Ok(len)
     }
-}
-
-#[derive(Error, Debug)]
-pub enum PersisterError {
-    #[error("Persister: Failed to read index file")]
-    ReadIndexIo(#[source] std::io::Error),
-    #[error("Persister: Failed to decode index data")]
-    DecodeIndex(#[from] SerializationError),
-    #[error("Persister: Failed to decode key from index")]
-    DecodeKey,
-    #[error("Persister: Failed to atomically write index state")]
-    AtomicWrite(#[from] IoError),
-    #[error("Index file is empty")]
-    EmptyIndexFile,
 }

@@ -5,44 +5,6 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-pub(crate) fn atomically_write_file_bytes(
-    target_path: &Path,
-    temp_path: &Path,
-    bytes: impl AsRef<[u8]>,
-) -> Result<(), IoError> {
-    let mut temp_file =
-        OpenOptions::new().write(true).create(true).truncate(true).open(temp_path).map_err(
-            |e| IoError::AtomicWrite {
-                step: AtomicWriteStep::CreateTemp,
-                target_path: target_path.to_path_buf(),
-                temp_path: temp_path.to_path_buf(),
-                source: e,
-            },
-        )?;
-
-    temp_file.write_all(bytes.as_ref()).map_err(|e| IoError::AtomicWrite {
-        step: AtomicWriteStep::WriteTemp,
-        target_path: target_path.to_path_buf(),
-        temp_path: temp_path.to_path_buf(),
-        source: e,
-    })?;
-    temp_file.sync_data().map_err(|e| IoError::AtomicWrite {
-        step: AtomicWriteStep::SyncTemp,
-        target_path: target_path.to_path_buf(),
-        temp_path: temp_path.to_path_buf(),
-        source: e,
-    })?;
-    drop(temp_file); // Ensure file is closed before rename
-
-    std::fs::rename(temp_path, target_path).map_err(|e| IoError::AtomicWrite {
-        step: AtomicWriteStep::Rename,
-        target_path: target_path.to_path_buf(),
-        temp_path: temp_path.to_path_buf(),
-        source: e,
-    })?;
-    Ok(())
-}
-
 #[derive(Debug, Clone)]
 pub enum AtomicWriteStep {
     CreateTemp,
@@ -88,7 +50,7 @@ pub fn is_same_fs(paths: &[&Path]) -> Result<bool, io::Error> {
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-pub fn is_same_fs(paths: &[&std::path::Path]) -> Result<bool, io::Error> {
+pub fn is_same_fs(paths: &[&Path]) -> Result<bool, io::Error> {
     same_fs_dev(paths)
 }
 
@@ -109,6 +71,44 @@ pub fn same_fs_dev(paths: &[&Path]) -> Result<bool, io::Error> {
     }
 
     Ok(true)
+}
+
+pub(crate) fn atomically_write_file_bytes(
+    target_path: &Path,
+    temp_path: &Path,
+    bytes: impl AsRef<[u8]>,
+) -> Result<(), IoError> {
+    let mut temp_file =
+        OpenOptions::new().write(true).create(true).truncate(true).open(temp_path).map_err(
+            |e| IoError::AtomicWrite {
+                step: AtomicWriteStep::CreateTemp,
+                target_path: target_path.to_path_buf(),
+                temp_path: temp_path.to_path_buf(),
+                source: e,
+            },
+        )?;
+
+    temp_file.write_all(bytes.as_ref()).map_err(|e| IoError::AtomicWrite {
+        step: AtomicWriteStep::WriteTemp,
+        target_path: target_path.to_path_buf(),
+        temp_path: temp_path.to_path_buf(),
+        source: e,
+    })?;
+    temp_file.sync_data().map_err(|e| IoError::AtomicWrite {
+        step: AtomicWriteStep::SyncTemp,
+        target_path: target_path.to_path_buf(),
+        temp_path: temp_path.to_path_buf(),
+        source: e,
+    })?;
+    drop(temp_file); // Ensure file is closed before rename
+
+    std::fs::rename(temp_path, target_path).map_err(|e| IoError::AtomicWrite {
+        step: AtomicWriteStep::Rename,
+        target_path: target_path.to_path_buf(),
+        temp_path: temp_path.to_path_buf(),
+        source: e,
+    })?;
+    Ok(())
 }
 
 // Best-effort mount-id via statx (Linux usually ≥ 5.8; may be backported).
@@ -151,7 +151,14 @@ compile_error!("plz send a pr if you want to use it on non-unix systems");
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    #[cfg(target_os = "linux")]
+    use std::path::Path;
+
+    use super::is_same_fs;
+    #[cfg(target_os = "linux")]
+    use super::mount_id_statx;
+    #[cfg(target_os = "linux")]
+    use super::same_fs_dev;
     use crate::{Cas, LibError};
 
     #[test]
