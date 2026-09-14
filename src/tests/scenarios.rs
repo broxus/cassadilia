@@ -9,6 +9,74 @@ use super::utils::setup_tracing;
 use crate::{Cas, Config, LibError, LibIoOperation, SyncMode};
 
 #[test]
+fn owned_transaction_outlives_handle_and_moves_between_threads() -> Result<()> {
+    let dir = tempdir()?;
+    let mut transaction: crate::OwnedTransaction<String> = {
+        let cas = Cas::open(dir.path(), Config::default())?;
+        let mut transaction = cas.put_owned("owned".to_owned())?;
+        transaction.write(b"first ")?;
+        assert!(cas.get(&"owned".to_owned())?.is_none());
+        transaction
+    };
+    // The owned transaction must retain the database lock as well as the writer.
+    assert!(matches!(
+        Cas::<String>::open(dir.path(), Config::default()),
+        Err(LibError::AlreadyOpened)
+    ));
+    transaction = std::thread::spawn(move || -> Result<crate::OwnedTransaction<String>> {
+        transaction.write(b"second")?;
+        Ok(transaction)
+    })
+    .join()
+    .expect("writer thread must finish")?;
+    transaction.finish()?;
+
+    let cas = Cas::open(dir.path(), Config::default())?;
+    assert_eq!(cas.get(&"owned".to_owned())?.unwrap().as_ref(), b"first second");
+    Ok(())
+}
+
+#[test]
+fn unfinished_owned_transaction_cleans_staging_and_preserves_existing_value() -> Result<()> {
+    let dir = tempdir()?;
+    let cas = Cas::open(dir.path(), Config::default())?;
+    let key = "owned".to_owned();
+    let mut original = cas.put(key.clone())?;
+    original.write(b"original")?;
+    original.finish()?;
+
+    let staging_path = {
+        let mut unfinished = cas.put_owned(key.clone())?;
+        unfinished.write(b"replacement")?;
+        let path = unfinished.temp_file.path().to_path_buf();
+        assert!(path.exists());
+        assert_eq!(cas.get(&key)?.unwrap().as_ref(), b"original");
+        path
+    };
+    assert!(!staging_path.exists());
+    assert_eq!(cas.get(&key)?.unwrap().as_ref(), b"original");
+    Ok(())
+}
+
+#[test]
+fn owned_transactions_support_interleaved_map_writes() -> Result<()> {
+    let dir = tempdir()?;
+    let cas = Cas::open(dir.path(), Config::default())?;
+    let mut uploads = std::collections::BTreeMap::new();
+    uploads.insert("a", cas.put_owned("a".to_owned())?);
+    uploads.insert("b", cas.put_owned("b".to_owned())?);
+    uploads.get_mut("a").unwrap().write(b"a1")?;
+    uploads.get_mut("b").unwrap().write(b"b1")?;
+    uploads.get_mut("a").unwrap().write(b"a2")?;
+    uploads.remove("a").unwrap().finish()?;
+    assert_eq!(cas.get(&"a".to_owned())?.unwrap().as_ref(), b"a1a2");
+    assert!(cas.get(&"b".to_owned())?.is_none());
+    uploads.remove("b").unwrap().finish()?;
+    assert_eq!(cas.get(&"b".to_owned())?.unwrap().as_ref(), b"b1");
+    Ok(())
+}
+
+#[test]
 fn test_put_get_remove_string_key() -> Result<()> {
     setup_tracing();
     let dir = tempdir()?;

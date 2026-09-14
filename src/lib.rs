@@ -15,7 +15,7 @@ mod wal;
 pub use cas::{Cas, CasInner, LibError, LibIoOperation, calculate_blob_hash};
 pub use index::{IndexReadGuard, IndexStateItem};
 pub use orphan::{OrphanStats, RecoveryResult};
-pub use transaction::Transaction;
+pub use transaction::{OwnedTransaction, Transaction};
 pub use types::{
     BlobHash, CasStats, CheckpointReason, Config, DbStats, HASH_SIZE, IndexStats, KeyBytes,
     SyncMode, TypesError, WAL_ENTRY_HEADER_SIZE, WAL_ENTRY_OP_HASH_SIZE, WAL_ENTRY_OP_LEN_SIZE,

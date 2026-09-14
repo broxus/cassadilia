@@ -14,7 +14,7 @@ use crate::orphan::OrphanStats;
 use crate::settings::{DbSettings, SettingsError, SettingsPersister};
 use crate::transaction::Transaction;
 use crate::types::{BlobHash, CheckpointReason, Config, DbStats, KeyBytes, SyncMode, TypesError};
-use crate::{orphan, paths, settings, transaction};
+use crate::{orphan, paths, settings};
 
 #[derive(Debug, Clone)]
 pub enum LibIoOperation {
@@ -105,6 +105,13 @@ impl<K> Cas<K>
 where
     K: KeyBytes + Clone + Eq + Ord + std::hash::Hash + Debug + Send + Sync + 'static,
 {
+    /// Starts a transaction that keeps the CAS alive until it is finished or dropped.
+    ///
+    /// Unlike [`CasInner::put`], the returned transaction does not borrow this handle.
+    pub fn put_owned(&self, key: K) -> Result<crate::OwnedTransaction<K>, LibError> {
+        Transaction::new_owned(Arc::clone(&self.0), key).map_err(LibError::from)
+    }
+
     pub fn open(db_root: impl AsRef<Path>, config: Config) -> Result<Self, LibError> {
         // Use open_with_recover internally and drop the stats
         let fail_on_integrity_errors = config.fail_on_integrity_errors;
@@ -270,22 +277,7 @@ where
 
     /// Start a new transaction for the given key.
     pub fn put(&self, key: K) -> Result<Transaction<'_, K>, LibError> {
-        Transaction::new(self, key).map_err(|e| match e {
-            transaction::TransactionError::StagingFileIo { operation, path, source } => {
-                match operation {
-                    transaction::StagingFileOp::Create => LibError::Io {
-                        operation: LibIoOperation::CreateStagingFile,
-                        path: Some(path),
-                        source,
-                    },
-                    transaction::StagingFileOp::Write => LibError::Io {
-                        operation: LibIoOperation::WriteStagingFile,
-                        path: Some(path),
-                        source,
-                    },
-                }
-            }
-        })
+        Transaction::new(self, key).map_err(LibError::from)
     }
 
     /// Get a blob by its key.
