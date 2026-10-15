@@ -250,15 +250,34 @@ impl Default for Config {
 // === core ops ===
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum WalOpRaw {
     Put { key_bytes: Vec<u8>, hash: BlobHash, size: u64 },
     Remove { keys_bytes: Vec<Vec<u8>> },
+    Rename { pairs_bytes: Vec<(Vec<u8>, Vec<u8>)> },
+}
+
+impl WalOpRaw {
+    pub(crate) const PUT_TAG: u8 = 0;
+    pub(crate) const REMOVE_TAG: u8 = 1;
+    pub(crate) const RENAME_TAG: u8 = 2;
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum WalOp<K> {
-    Put { key: K, hash: BlobHash, size: u64 },
-    Remove { keys: Vec<K> },
+    Put {
+        key: K,
+        hash: BlobHash,
+        size: u64,
+    },
+    Remove {
+        keys: Vec<K>,
+    },
+    /// Moves each `(from, to)` index entry to its new key.
+    Rename {
+        pairs: Vec<(K, K)>,
+    },
 }
 
 impl<K: KeyBytes> WalOp<K> {
@@ -280,6 +299,18 @@ impl<K: KeyBytes> WalOp<K> {
                 }
                 Ok(WalOp::Remove { keys })
             }
+            WalOpRaw::Rename { pairs_bytes } => {
+                let mut pairs = Vec::with_capacity(pairs_bytes.len());
+                for (i, (from_bytes, to_bytes)) in pairs_bytes.iter().enumerate() {
+                    let (Some(from), Some(to)) =
+                        (K::from_key_bytes(from_bytes), K::from_key_bytes(to_bytes))
+                    else {
+                        return Err(TypesError::RenameDecodeKey { index: i });
+                    };
+                    pairs.push((from, to));
+                }
+                Ok(WalOp::Rename { pairs })
+            }
         }
     }
 
@@ -296,11 +327,19 @@ impl<K: KeyBytes> WalOp<K> {
                 }
                 WalOpRaw::Remove { keys_bytes }
             }
+            WalOp::Rename { pairs } => {
+                let pairs_bytes = pairs
+                    .iter()
+                    .map(|(from, to)| (from.to_key_bytes_owned(), to.to_key_bytes_owned()))
+                    .collect();
+                WalOpRaw::Rename { pairs_bytes }
+            }
         }
     }
 }
 
 #[derive(Error, Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum TypesError {
     #[error("Invalid hash format")]
     InvalidHashFormat(#[from] hex::FromHexError),
@@ -319,6 +358,8 @@ pub enum TypesError {
     RemoveDecodeKey { index: usize },
     #[error("Failed to decode key for Put operation")]
     DecodeKeyPutFailed,
+    #[error("Rename: failed to decode a key of pair {index}")]
+    RenameDecodeKey { index: usize },
 }
 
 // === WAL ===

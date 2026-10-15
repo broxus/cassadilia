@@ -59,9 +59,7 @@ pub enum WalError {
         "WAL corruption: checksum mismatch for WAL entry (version {version}, segment {segment_id})"
     )]
     ReplayChecksumMismatch { version: u64, segment_id: u64, expected: BlobHash, actual: BlobHash },
-    #[error(
-        "WAL corruption: failed to deserialize WalOpRaw (version {version}, segment {segment_id})"
-    )]
+    #[error("WAL replay: failed to deserialize WalOpRaw (version {version}, segment {segment_id})")]
     ReplayDeserializeWalOpRaw {
         version: NonZeroU64,
         segment_id: u64,

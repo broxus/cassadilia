@@ -10,7 +10,7 @@ use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
 
 use super::persistence::{IndexStatePersister, PersisterError};
-use super::state::{IndexState, IndexStateError, IndexStateItem};
+use super::state::{IndexState, IndexStateError, IndexStateItem, RenameError};
 use crate::paths::DbPaths;
 use crate::types::{BlobHash, CheckpointReason, Config, DbStats, KeyBytes, WalOp};
 use crate::wal::{WalError, WalManager};
@@ -135,6 +135,9 @@ pub enum IndexError {
 
     #[error("Key not found: {key}")]
     KeyNotFound { key: String },
+
+    #[error(transparent)]
+    Rename(#[from] RenameError),
 
     #[error("Initialization: Failed to {operation}")]
     Io {
@@ -368,6 +371,28 @@ where
         if rolled_over {
             let mut state = self.state.write();
             let mut wal = self.wal.lock();
+            self.checkpoint_inner(CheckpointReason::SegmentRollover, &mut wal, &mut state)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn apply_rename_op(&self, pairs: Vec<(K, K)>) -> Result<(), IndexError> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+
+        let mut state = self.state.write();
+        let mut wal = self.wal.lock();
+
+        // A refused batch leaves no WAL entry.
+        state.check_rename(&pairs)?;
+
+        let logical_op = WalOp::Rename { pairs };
+        let (_unreferenced, _append_info, rolled_over) =
+            Self::apply_wal_op_unsafe(&mut state, &mut wal, &logical_op)?;
+
+        if rolled_over {
             self.checkpoint_inner(CheckpointReason::SegmentRollover, &mut wal, &mut state)?;
         }
 

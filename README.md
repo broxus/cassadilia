@@ -53,6 +53,8 @@ We use scoped intents to prevent races between concurrent puts and deletes.
   replaced intent; no refcount changes.
 - Remove ops: append WAL Remove, apply to state, filter unreferenced blobs
   against active intents, delete before doing checkpoint.
+- Rename ops: check the batch, append WAL Rename, move the entries. Refcounts
+  don't change and no blob is deleted. Intents are not used.
 
 Intents are in-memory only; if a process exits before commit, any staged files
 become orphans, handled by startup orphan scanning.

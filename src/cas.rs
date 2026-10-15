@@ -232,6 +232,12 @@ where
                         existing_settings.num_ops_per_wal, config.num_ops_per_wal
                     ))));
                 }
+                // Written before any WAL entry: 0.4 must refuse the store before it can hold a
+                // Rename entry.
+                let upgraded = existing_settings.upgraded();
+                if upgraded != existing_settings {
+                    settings_persister.save(&upgraded).map_err(LibError::Settings)?;
+                }
                 existing_settings.dir_tree_is_pre_created
             }
             None => {
@@ -240,6 +246,8 @@ where
                     version: settings::CURRENT_DB_VERSION,
                     dir_tree_is_pre_created: config.pre_create_cas_dirs,
                     num_ops_per_wal: config.num_ops_per_wal,
+                    wal_format: settings::WAL_FORMAT,
+                    index_format: settings::INDEX_FORMAT,
                 };
 
                 // Pre-create directories if requested
@@ -366,6 +374,22 @@ where
         self.index.apply_remove_op(keys_to_remove, &delete_fn).map_err(LibError::Index)?;
 
         Ok(keys_to_remove_count)
+    }
+
+    /// Renames keys in the index. Blobs stay where they are.
+    ///
+    /// The call fails and changes nothing if a source key is missing, a target key exists,
+    /// or a key appears twice among the sources or twice among the targets.
+    /// Targets are checked against the index as it was before the batch: `a -> b, b -> c`
+    /// fails.
+    /// An empty batch does nothing.
+    ///
+    /// After any error, reopen the store before the next rename.
+    ///
+    /// To reopen the store with a key type that cannot read the old keys, call
+    /// [`checkpoint`](Self::checkpoint) after the last rename.
+    pub fn rename_many(&self, pairs: impl IntoIterator<Item = (K, K)>) -> Result<(), LibError> {
+        self.index.apply_rename_op(pairs.into_iter().collect()).map_err(LibError::Index)
     }
 
     /// Checkpoint the index to persist the current state.

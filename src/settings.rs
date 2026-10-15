@@ -6,7 +6,17 @@ use thiserror::Error;
 
 use crate::io::atomically_write_file_bytes;
 
-pub const CURRENT_DB_VERSION: u32 = 4;
+/// Store version, saved in `db_settings.json`. 0.4 opens only version 4 and refuses
+/// version 5 stores.
+pub const CURRENT_DB_VERSION: u32 = 5;
+/// Version 4, written by 0.4. Its settings have no format fields. Both read as 1.
+/// Upgraded to [`CURRENT_DB_VERSION`] on open.
+const LEGACY_DB_VERSION: u32 = 4;
+
+/// WAL format. 2 adds `Rename`.
+pub(crate) const WAL_FORMAT: u32 = 2;
+/// Index file format.
+pub(crate) const INDEX_FORMAT: u32 = 1;
 
 #[derive(Error, Debug)]
 pub enum SettingsError {
@@ -25,8 +35,13 @@ pub enum SettingsError {
     #[error(transparent)]
     AtomicWrite(#[from] crate::io::IoError),
 
-    #[error("Unsupported database version: {found}, expected: {expected}")]
+    #[error("Unsupported database version: {found}, expected: {} or {expected}", LEGACY_DB_VERSION)]
     UnsupportedVersion { found: u32, expected: u32 },
+
+    #[error(
+        "Unsupported {format} format {found} in db_settings.json: this cassadilia reads up to {supported}"
+    )]
+    UnsupportedFormat { format: &'static str, found: u32, supported: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -34,6 +49,26 @@ pub(crate) struct DbSettings {
     pub version: u32,
     pub dir_tree_is_pre_created: bool,
     pub num_ops_per_wal: NonZeroU64,
+    #[serde(default = "first_format")]
+    pub wal_format: u32,
+    #[serde(default = "first_format")]
+    pub index_format: u32,
+}
+
+impl DbSettings {
+    /// The same settings with the versions and formats this cassadilia writes.
+    pub fn upgraded(&self) -> Self {
+        Self {
+            version: CURRENT_DB_VERSION,
+            wal_format: WAL_FORMAT,
+            index_format: INDEX_FORMAT,
+            ..self.clone()
+        }
+    }
+}
+
+fn first_format() -> u32 {
+    1
 }
 
 pub(crate) struct SettingsPersister {
@@ -51,11 +86,19 @@ impl SettingsPersister {
                 let settings: DbSettings =
                     serde_json::from_str(&content).map_err(SettingsError::ParseFailed)?;
 
-                if settings.version != CURRENT_DB_VERSION {
+                if settings.version != CURRENT_DB_VERSION && settings.version != LEGACY_DB_VERSION {
                     return Err(SettingsError::UnsupportedVersion {
                         found: settings.version,
                         expected: CURRENT_DB_VERSION,
                     });
+                }
+                for (format, found, supported) in [
+                    ("WAL", settings.wal_format, WAL_FORMAT),
+                    ("index", settings.index_format, INDEX_FORMAT),
+                ] {
+                    if found > supported {
+                        return Err(SettingsError::UnsupportedFormat { format, found, supported });
+                    }
                 }
 
                 Ok(Some(settings))
@@ -85,7 +128,10 @@ mod tests {
     use anyhow::Result;
     use tempfile::tempdir;
 
-    use super::{CURRENT_DB_VERSION, SettingsError, SettingsPersister};
+    use super::{
+        CURRENT_DB_VERSION, INDEX_FORMAT, LEGACY_DB_VERSION, SettingsError, SettingsPersister,
+        WAL_FORMAT,
+    };
     use crate::tests::utils::directory_helpers::{
         analyze_directory_structure, count_directories_recursive, count_leaf_directories,
     };
@@ -216,6 +262,8 @@ mod tests {
         assert_eq!(loaded_settings.version, CURRENT_DB_VERSION);
         assert!(loaded_settings.dir_tree_is_pre_created);
         assert_eq!(loaded_settings.num_ops_per_wal.get(), 5000);
+        assert_eq!(loaded_settings.wal_format, WAL_FORMAT);
+        assert_eq!(loaded_settings.index_format, INDEX_FORMAT);
 
         Ok(())
     }
@@ -250,8 +298,8 @@ mod tests {
         let dir = tempdir()?;
         let settings_path = dir.path().join("db_settings.json");
 
-        // Write a settings file with past version
-        let past_version = CURRENT_DB_VERSION.saturating_sub(1);
+        // Write a version 3 settings file, which is refused
+        let past_version = LEGACY_DB_VERSION - 1;
         let content = format!(
             r#"{{"version":{},"dir_tree_is_pre_created":false,"num_ops_per_wal":1000}}"#,
             past_version
@@ -268,6 +316,62 @@ mod tests {
                 if found == past_version && expected == CURRENT_DB_VERSION
         ));
 
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_store_is_upgraded_on_open() -> Result<()> {
+        let dir = tempdir()?;
+        let db_path = dir.path();
+        let settings_path = db_path.join("db_settings.json");
+        let config =
+            Config { num_ops_per_wal: NonZeroU64::new(1000).unwrap(), ..Default::default() };
+
+        {
+            let cas = Cas::<String>::open(db_path, config.clone())?;
+            let mut tx = cas.put("key".to_owned())?;
+            tx.write(b"data")?;
+            tx.finish()?;
+        }
+        // The settings file as cassadilia 0.4.8 writes it.
+        std::fs::write(
+            &settings_path,
+            r#"{"version":4,"dir_tree_is_pre_created":false,"num_ops_per_wal":1000}"#,
+        )?;
+
+        let cas = Cas::<String>::open(db_path, config)?;
+        assert_eq!(cas.get(&"key".to_owned())?.as_deref(), Some(&b"data"[..]));
+
+        let settings = SettingsPersister::new(settings_path).load()?.expect("settings exist");
+        assert_eq!(settings.version, CURRENT_DB_VERSION);
+        assert_eq!(settings.wal_format, WAL_FORMAT);
+        assert_eq!(settings.index_format, INDEX_FORMAT);
+        Ok(())
+    }
+
+    #[test]
+    fn newer_formats_are_rejected() -> Result<()> {
+        for (format, wal_format, index_format, supported) in [
+            ("WAL", WAL_FORMAT + 1, INDEX_FORMAT, WAL_FORMAT),
+            ("index", WAL_FORMAT, INDEX_FORMAT + 1, INDEX_FORMAT),
+        ] {
+            let dir = tempdir()?;
+            let settings_path = dir.path().join("db_settings.json");
+            let content = format!(
+                r#"{{"version":{CURRENT_DB_VERSION},"dir_tree_is_pre_created":false,"num_ops_per_wal":1000,"wal_format":{wal_format},"index_format":{index_format}}}"#
+            );
+            std::fs::write(&settings_path, content)?;
+
+            let result = SettingsPersister::new(settings_path).load();
+            assert!(
+                matches!(
+                    result,
+                    Err(SettingsError::UnsupportedFormat { format: f, found, supported: s })
+                        if f == format && found == supported + 1 && s == supported
+                ),
+                "{format}: {result:?}"
+            );
+        }
         Ok(())
     }
 }

@@ -21,8 +21,8 @@ pub enum SerializationError {
         parsing_context: &'static str,
     },
 
-    #[error("invalid variant tag {tag} for {enum_name} while parsing {parsing_context}")]
-    InvalidVariantTag { tag: u8, enum_name: &'static str, parsing_context: &'static str },
+    #[error("unknown WAL op tag {tag}")]
+    UnsupportedWalOpTag { tag: u8 },
 }
 
 /// serialize `BTreeMap`<Vec<u8>, `IndexStateItem`> using hand-rolled format
@@ -103,13 +103,13 @@ pub(crate) fn deserialize_index_state(
 /// format: [u8 `variant_tag`][variant_data]
 ///   Put: 0 + [u32 `key_len`][key_bytes][`32_bytes_hash`]
 ///   Remove: 1 + [`keys_data` bytes...]
+///   Rename: 2 + [u32 `num_pairs`][[u32 `from_len`][from][u32 `to_len`][to]]...
 pub(crate) fn serialize_wal_op_raw(op: &WalOpRaw) -> Result<Vec<u8>, SerializationError> {
     let mut result = Vec::new();
 
     match op {
         WalOpRaw::Put { key_bytes, hash, size } => {
-            // variant tag
-            result.push(0);
+            result.push(WalOpRaw::PUT_TAG);
 
             // key length and bytes
             let key_len = key_bytes.len() as u32;
@@ -123,8 +123,7 @@ pub(crate) fn serialize_wal_op_raw(op: &WalOpRaw) -> Result<Vec<u8>, Serializati
             result.extend_from_slice(&size.to_le_bytes());
         }
         WalOpRaw::Remove { keys_bytes } => {
-            // variant tag
-            result.push(1);
+            result.push(WalOpRaw::REMOVE_TAG);
 
             // serialize the keys: [num_keys][len1][key1][len2][key2]...
             let num_keys = keys_bytes.len() as u32;
@@ -134,6 +133,20 @@ pub(crate) fn serialize_wal_op_raw(op: &WalOpRaw) -> Result<Vec<u8>, Serializati
                 let key_len = key_bytes.len() as u32;
                 result.extend_from_slice(&key_len.to_le_bytes());
                 result.extend_from_slice(key_bytes);
+            }
+        }
+        WalOpRaw::Rename { pairs_bytes } => {
+            result.push(WalOpRaw::RENAME_TAG);
+
+            let num_pairs = pairs_bytes.len() as u32;
+            result.extend_from_slice(&num_pairs.to_le_bytes());
+
+            for (from, to) in pairs_bytes {
+                for key_bytes in [from, to] {
+                    let key_len = key_bytes.len() as u32;
+                    result.extend_from_slice(&key_len.to_le_bytes());
+                    result.extend_from_slice(key_bytes);
+                }
             }
         }
     }
@@ -148,16 +161,14 @@ pub(crate) fn deserialize_wal_op_raw(bytes: &[u8]) -> Result<WalOpRaw, Serializa
     let variant_tag = read_u8(&mut bytes, "WalOpRaw variant")?;
 
     match variant_tag {
-        0 => {
-            // Put variant
+        WalOpRaw::PUT_TAG => {
             let key_bytes = read_bytes_with_len(&mut bytes, "WalOpRaw Put key")?;
             let hash = read_fixed_bytes::<HASH_SIZE>(&mut bytes, "WalOpRaw Put hash")?;
             let size = read_u64(&mut bytes, "WalOpRaw Put size")?;
             let hash = BlobHash::from_bytes(hash);
             Ok(WalOpRaw::Put { key_bytes, hash, size })
         }
-        1 => {
-            // Remove variant
+        WalOpRaw::REMOVE_TAG => {
             // deserialize the keys: [num_keys][len1][key1][len2][key2]...
             let num_keys = read_u32(&mut bytes, "Remove num_keys")? as usize;
 
@@ -169,11 +180,19 @@ pub(crate) fn deserialize_wal_op_raw(bytes: &[u8]) -> Result<WalOpRaw, Serializa
 
             Ok(WalOpRaw::Remove { keys_bytes })
         }
-        _ => Err(SerializationError::InvalidVariantTag {
-            tag: variant_tag,
-            enum_name: "WalOpRaw",
-            parsing_context: "WalOpRaw deserialization",
-        }),
+        WalOpRaw::RENAME_TAG => {
+            let num_pairs = read_u32(&mut bytes, "Rename num_pairs")? as usize;
+
+            let mut pairs_bytes = Vec::new();
+            for _ in 0..num_pairs {
+                let from = read_bytes_with_len(&mut bytes, "Rename from key")?;
+                let to = read_bytes_with_len(&mut bytes, "Rename to key")?;
+                pairs_bytes.push((from, to));
+            }
+
+            Ok(WalOpRaw::Rename { pairs_bytes })
+        }
+        _ => Err(SerializationError::UnsupportedWalOpTag { tag: variant_tag }),
     }
 }
 
@@ -335,7 +354,7 @@ mod tests {
                 assert_eq!(hash, blob_hash);
                 assert_eq!(size, blob_size);
             }
-            WalOpRaw::Remove { .. } => panic!("Wrong variant"),
+            WalOpRaw::Remove { .. } | WalOpRaw::Rename { .. } => panic!("Wrong variant"),
         }
     }
 
@@ -353,7 +372,7 @@ mod tests {
                 assert_eq!(hash, blob_hash);
                 assert_eq!(size, blob_size);
             }
-            WalOpRaw::Remove { .. } => panic!("Wrong variant"),
+            WalOpRaw::Remove { .. } | WalOpRaw::Rename { .. } => panic!("Wrong variant"),
         }
     }
 
@@ -368,7 +387,7 @@ mod tests {
             WalOpRaw::Remove { keys_bytes } => {
                 assert_eq!(keys_bytes.len(), 0);
             }
-            WalOpRaw::Put { .. } => panic!("Wrong variant"),
+            WalOpRaw::Put { .. } | WalOpRaw::Rename { .. } => panic!("Wrong variant"),
         }
     }
 
@@ -386,7 +405,24 @@ mod tests {
                 };
                 assert_eq!(only.as_slice(), b"");
             }
-            WalOpRaw::Put { .. } => panic!("Wrong variant"),
+            WalOpRaw::Put { .. } | WalOpRaw::Rename { .. } => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_wal_op_rename_pairs() {
+        let pairs_bytes = vec![
+            (b"a".to_vec(), b"x".to_vec()),
+            (b"".to_vec(), vec![0xFF; 1000]),
+            (b"b".to_vec(), b"y".to_vec()),
+        ];
+        let op = WalOpRaw::Rename { pairs_bytes: pairs_bytes.clone() };
+        let serialized = serialize_wal_op_raw(&op).unwrap();
+        let deserialized = deserialize_wal_op_raw(&serialized).unwrap();
+
+        match deserialized {
+            WalOpRaw::Rename { pairs_bytes: decoded } => assert_eq!(decoded, pairs_bytes),
+            WalOpRaw::Put { .. } | WalOpRaw::Remove { .. } => panic!("Wrong variant"),
         }
     }
 
@@ -413,7 +449,7 @@ mod tests {
                 assert_eq!(second.as_slice(), b"hello");
                 assert_eq!(third, &large_key);
             }
-            WalOpRaw::Put { .. } => panic!("Wrong variant"),
+            WalOpRaw::Put { .. } | WalOpRaw::Rename { .. } => panic!("Wrong variant"),
         }
     }
 
@@ -444,7 +480,7 @@ mod tests {
         assert!(result.is_err());
 
         // test with valid tag but invalid data
-        let mut invalid_data = vec![0]; // Put variant
+        let mut invalid_data = vec![WalOpRaw::PUT_TAG];
         invalid_data.extend_from_slice(&4u32.to_le_bytes()); // key len = 4
         invalid_data.extend_from_slice(b"hi"); // but only 2 bytes
         let result = deserialize_wal_op_raw(&invalid_data);

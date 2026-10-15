@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Debug;
 use std::num::NonZeroU64;
 
 use ahash::HashMap;
@@ -12,6 +13,21 @@ pub enum IndexStateError {
     DecrementZeroRefCount { hash: BlobHash },
     #[error("Hash {hash} not found for decrement")]
     HashNotFoundForDecrement { hash: BlobHash },
+    #[error(transparent)]
+    Rename(#[from] RenameError),
+}
+
+/// Why [`IndexState::check_rename`] refused a batch.
+#[derive(Error, Debug)]
+pub enum RenameError {
+    #[error("rename source key {key} does not exist")]
+    SourceMissing { key: String },
+    #[error("rename target key {key} already exists")]
+    TargetExists { key: String },
+    #[error("key {key} is renamed twice in one batch")]
+    DuplicateSource { key: String },
+    #[error("two keys are renamed to {key} in one batch")]
+    DuplicateTarget { key: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,7 +103,7 @@ impl<K> IndexState<K> {
 
 impl<K> IndexState<K>
 where
-    K: Clone + Ord,
+    K: Clone + Ord + Debug,
 {
     pub fn apply_logical_op(&mut self, op: &WalOp<K>) -> Result<Vec<BlobHash>, IndexStateError> {
         let mut unreferenced_hashes = Vec::new();
@@ -144,8 +160,38 @@ where
                     }
                 }
             }
+
+            WalOp::Rename { pairs } => {
+                // Entries only move. Refcounts and stats stay the same.
+                self.check_rename(pairs)?;
+                for (from, to) in pairs {
+                    let item = self.key_to_hash.remove(from).expect("checked by check_rename");
+                    self.key_to_hash.insert(to.clone(), item);
+                }
+            }
         }
 
         Ok(unreferenced_hashes)
+    }
+
+    /// Checks a batch by the rule of [`CasInner::rename_many`](crate::CasInner::rename_many).
+    pub(crate) fn check_rename(&self, pairs: &[(K, K)]) -> Result<(), RenameError> {
+        let mut sources = BTreeSet::new();
+        let mut targets = BTreeSet::new();
+        for (from, to) in pairs {
+            if !self.key_to_hash.contains_key(from) {
+                return Err(RenameError::SourceMissing { key: format!("{from:?}") });
+            }
+            if self.key_to_hash.contains_key(to) {
+                return Err(RenameError::TargetExists { key: format!("{to:?}") });
+            }
+            if !sources.insert(from) {
+                return Err(RenameError::DuplicateSource { key: format!("{from:?}") });
+            }
+            if !targets.insert(to) {
+                return Err(RenameError::DuplicateTarget { key: format!("{to:?}") });
+            }
+        }
+        Ok(())
     }
 }
